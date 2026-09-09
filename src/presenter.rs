@@ -9,7 +9,7 @@ use crate::input::{Bindings, REGISTRY, key_label};
 use crate::layout::{Orientation, geometry};
 use crate::model::{FileEntry, RepoEntry, StatusGroup};
 use crate::render::neutralize_plain_text;
-use crate::tree::RowId;
+use crate::tree::{Row, RowId};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -178,19 +178,46 @@ fn draw_tree(frame: &mut Frame, controller: &Controller, area: Rect) -> Vec<(u16
     let tree = controller.tree();
     let repos = controller.repos();
     let height = inner.height as usize;
+    let (lines, hits) = windowed_rows(tree.rows(), repos, tree.cursor(), height, inner.y, |id| {
+        tree.is_collapsed(id)
+    });
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    hits
+}
+
+/// The pure heart of `draw_tree`: which rows are visible in a `height`-tall window starting at
+/// the cursor's neighborhood, formatted to text, alongside where each landed on screen.
+///
+/// `base_y` is the first screen row of the window (`inner.y` in `draw_tree`; `0` in tests).
+///
+/// A row whose indices do not resolve against `repos` (which cannot happen through the public
+/// API today, since the tree and the presenter always read the same repo list, but nothing in
+/// the type system rules it out for a future caller) is skipped — but skipping must never let
+/// `hits`' `y` diverge from the row's ACTUAL screen line. `lines` is packed contiguously from
+/// `base_y`, so deriving `y` from `lines.len()` (rather than from the loop's `offset`, which
+/// counts skipped rows too) keeps that invariant true by construction: `hits.len() ==
+/// lines.len()` always, and every `y` is `base_y + 0, base_y + 1, …` with no gaps.
+fn windowed_rows(
+    rows: &[Row],
+    repos: &[RepoEntry],
+    cursor: usize,
+    height: usize,
+    base_y: u16,
+    is_collapsed: impl Fn(&RowId) -> bool,
+) -> (Vec<Line<'static>>, Vec<(u16, usize)>) {
     // Keep the cursor on screen with the simplest rule that never jumps: scroll only far
     // enough to include it.
-    let first = tree.cursor().saturating_sub(height.saturating_sub(1));
+    let first = cursor.saturating_sub(height.saturating_sub(1));
     let mut lines = Vec::new();
     let mut hits = Vec::new();
-    for (offset, row) in tree.rows().iter().skip(first).take(height).enumerate() {
+    for (offset, row) in rows.iter().skip(first).take(height).enumerate() {
         let Some(repo) = repos.get(row.repo_idx) else {
             continue;
         };
         let text = match &row.id {
-            RowId::Repo { .. } => repo_line(repo, tree.is_collapsed(&row.id)),
+            RowId::Repo { .. } => repo_line(repo, is_collapsed(&row.id)),
             RowId::Group { .. } => match row.group_idx.and_then(|i| repo.groups.get(i)) {
-                Some(group) => format!("  {}", group_line(group, tree.is_collapsed(&row.id))),
+                Some(group) => format!("  {}", group_line(group, is_collapsed(&row.id))),
                 None => continue,
             },
             RowId::File { .. } => {
@@ -205,16 +232,18 @@ fn draw_tree(frame: &mut Frame, controller: &Controller, area: Rect) -> Vec<(u16
             }
         };
         let index = first + offset;
-        let style = if index == tree.cursor() {
+        let style = if index == cursor {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
             Style::default()
         };
-        hits.push((inner.y + offset as u16, index));
+        // Derived from what has actually been pushed to `lines` so far, not from `offset` —
+        // `offset` counts rows skipped by a `continue` above, `lines.len()` does not.
+        let y = base_y + lines.len() as u16;
+        hits.push((y, index));
         lines.push(Line::styled(text, style));
     }
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-    hits
+    (lines, hits)
 }
 
 /// Draw the diff region, with a title in the stacked layout where it doubles as the divider.
@@ -486,6 +515,50 @@ mod tests {
             assert!(all.contains(row.description), "{} missing", row.name);
         }
         assert!(all.contains('j') && all.contains(']'), "{all}");
+    }
+
+    // ---- windowed_rows: the pure row-selection core of draw_tree ---------------------------------
+
+    /// A minimal one-repo entry, distinguishable only by its path, for `windowed_rows` tests.
+    fn named_repo(name: &str) -> RepoEntry {
+        RepoEntry {
+            path: PathBuf::from(format!("/w/{name}")),
+            display_name: name.to_string(),
+            ..RepoEntry::blank()
+        }
+    }
+
+    fn repo_row(repo_idx: usize) -> Row {
+        Row {
+            id: RowId::Repo {
+                repo: PathBuf::from(format!("/w/row-{repo_idx}")),
+            },
+            depth: 0,
+            repo_idx,
+            group_idx: None,
+            file_idx: None,
+        }
+    }
+
+    #[test]
+    fn a_row_that_does_not_resolve_does_not_desync_the_reported_screen_rows_from_what_was_drawn() {
+        // The middle row's `repo_idx` (99) does not resolve against `repos` (only 0 and 1 are
+        // valid) — the one skip path reachable with hand-built data, standing in for all three
+        // `continue`s in the loop, which share the same reporting logic.
+        let rows = vec![repo_row(0), repo_row(99), repo_row(1)];
+        let repos = vec![named_repo("a"), named_repo("b")];
+        let (lines, hits) = windowed_rows(&rows, &repos, 0, 10, 5, |_| false);
+
+        // The invariant `Hits` exists for: every drawn line has exactly one hit, and the hits'
+        // `y` values are exactly the screen rows `lines` actually occupies — contiguous from
+        // `base_y`, with no gap left by the skipped row.
+        assert_eq!(hits.len(), lines.len(), "one hit per drawn line");
+        let ys: Vec<u16> = hits.iter().map(|(y, _)| *y).collect();
+        assert_eq!(
+            ys,
+            vec![5, 6],
+            "{ys:?}: must be contiguous from base_y, not leave a gap"
+        );
     }
 
     // ---- smoke tests through a real backend -------------------------------------------------------
