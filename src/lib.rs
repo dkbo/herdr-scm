@@ -15,6 +15,7 @@ pub mod layout;
 pub mod model;
 pub mod porcelain;
 pub mod proc;
+pub mod render;
 pub mod repo_kind;
 pub mod tree;
 
