@@ -3,6 +3,9 @@
 //! Read-only by construction: no module writes files or mutates git state. `git` is
 //! shelled out from `git.rs` alone, and only with read-only subcommands.
 
+pub mod model;
+pub mod repo_kind;
+
 use std::process::ExitCode;
 
 /// The testable core: everything the binary does, with failure as a message rather than an
