@@ -219,10 +219,22 @@ mod tests {
 
     #[test]
     fn a_tab_id_that_could_option_inject_is_never_emitted() {
+        // The workspace gate above only ever admits a SWITCHTAB candidate whose tab id shares
+        // the focused pane's workspace prefix (the text before the first `:`). That means the
+        // full token handed to `herdr tab focus <token>` can start with `-` ONLY IF the shared
+        // workspace prefix itself does. A colon-less id (like the previous version of this
+        // test used) has workspace `None`, which never equals the focused pane's `Some(_)`
+        // workspace, so it is rejected by the workspace gate BEFORE `is_flag_safe` is ever
+        // consulted — proving nothing about the flag-safety guard it claims to cover. Giving
+        // both panes the dash-prefixed workspace `-w` is what actually clears the gate and
+        // reaches the filter below, which then rejects it.
         let json = list(&[
-            pane("wA:p1", None, "wA:t1", true),
-            pane("wA:p9", Some(PANE_LABEL), "-evil", false),
+            pane("-w:p1", None, "-w:t1", true),
+            pane("-w:p9", Some(PANE_LABEL), "-w:t2", false),
         ]);
         assert_eq!(launch_decision_tab(&json), "OPEN");
+        // Positive twin, pinning the other side of the guard (a same-workspace, flag-SAFE tab
+        // id elsewhere DOES switch): `an_scm_pane_in_another_tab_of_this_workspace_is_switched_to_not_duplicated`
+        // above. Without that test, a filter that rejected everything would also pass this one.
     }
 }
