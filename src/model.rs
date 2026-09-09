@@ -155,12 +155,15 @@ fn dir_name(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
-/// `path` relative to `base`, forward-slashed. Empty when they are the same path; the absolute
-/// path (lossy) when `path` is not under `base`, so a mis-scoped entry is visibly odd in the UI
-/// rather than silently blank.
-fn rel_to_slash(path: &Path, base: &Path) -> String {
-    match path.strip_prefix(base) {
-        Ok(rel) => rel
+/// `path` relative to `base`, forward-slashed. `None` when `path` is not under `base`.
+///
+/// Forward slashes everywhere because the rest of the app speaks git's convention (status
+/// paths, diff paths, `.gitmodules` entries), and comparing a walk-produced path against a
+/// `.gitmodules` entry only works if both use the same separator.
+pub fn rel_slash(path: &Path, base: &Path) -> Option<String> {
+    Some(
+        path.strip_prefix(base)
+            .ok()?
             .components()
             .filter_map(|c| match c {
                 std::path::Component::Normal(s) => s.to_str(),
@@ -168,8 +171,13 @@ fn rel_to_slash(path: &Path, base: &Path) -> String {
             })
             .collect::<Vec<_>>()
             .join("/"),
-        Err(_) => path.to_string_lossy().into_owned(),
-    }
+    )
+}
+
+/// `rel_slash`, falling back to the absolute path (lossy) when `path` is not under `base`, so a
+/// mis-scoped entry is visibly odd in the UI rather than silently blank.
+fn rel_to_slash(path: &Path, base: &Path) -> String {
+    rel_slash(path, base).unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
@@ -252,5 +260,26 @@ mod tests {
         assert_eq!(RepoKind::Submodule.label(), "submodule");
         assert_eq!(RepoKind::Worktree.label(), "worktree");
         assert_eq!(RepoKind::Nested.label(), "nested");
+    }
+
+    #[test]
+    fn rel_slash_is_none_when_the_path_is_not_under_the_base() {
+        assert_eq!(rel_slash(Path::new("/x/y"), Path::new("/a")), None);
+    }
+
+    #[test]
+    fn rel_slash_of_the_base_itself_is_empty() {
+        assert_eq!(
+            rel_slash(Path::new("/a/b"), Path::new("/a/b")),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn rel_slash_joins_components_with_forward_slashes() {
+        assert_eq!(
+            rel_slash(Path::new("/a/b/c/d"), Path::new("/a")),
+            Some("b/c/d".to_string())
+        );
     }
 }
