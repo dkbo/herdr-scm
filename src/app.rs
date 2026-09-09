@@ -217,9 +217,18 @@ fn build_renderer(settings: &Settings) -> Arc<dyn DiffRenderer> {
 
 fn enter_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
+    // From here on, any failure must undo the raw mode just enabled: its termios settings are
+    // a property of the TTY, not the process, so propagating without cleanup would leave the
+    // user's shell echo-less and line-editing-less after we exit.
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen)?;
-    Terminal::new(CrosstermBackend::new(stdout))
+    if let Err(e) = crossterm::execute!(stdout, EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(e);
+    }
+    Terminal::new(CrosstermBackend::new(stdout)).inspect_err(|_| {
+        let _ = disable_raw_mode();
+        let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen);
+    })
 }
 
 fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
