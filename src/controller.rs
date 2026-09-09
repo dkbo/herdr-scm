@@ -141,8 +141,15 @@ impl Controller {
             // The repo list itself only matters via the snapshot that follows it, but the scan
             // starts it carries drive the empty state's "we looked here" list.
             PollMsg::Roots(roots) => {
-                let mut starts: Vec<PathBuf> = roots.iter().map(|r| r.scan_root.clone()).collect();
-                starts.dedup();
+                // First-seen-order de-duplication: `Vec::dedup()` only removes CONSECUTIVE
+                // duplicates, and scan starts are not sorted, so a repeat further down the list
+                // would otherwise survive.
+                let mut seen = std::collections::HashSet::new();
+                let starts: Vec<PathBuf> = roots
+                    .iter()
+                    .map(|r| r.scan_root.clone())
+                    .filter(|p| seen.insert(p.clone()))
+                    .collect();
                 if !starts.is_empty() {
                     self.scan_roots = starts;
                 }
@@ -304,7 +311,7 @@ impl Controller {
 mod tests {
     use super::*;
     use crate::config::Settings;
-    use crate::model::{FileEntry, RepoEntry, RepoKind, StatusGroup};
+    use crate::model::{FileEntry, RepoEntry, RepoKind, RepoRoot, StatusGroup};
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -314,6 +321,8 @@ mod tests {
         copied: RefCell<Vec<String>>,
         herdr_calls: RefCell<Vec<Vec<String>>>,
         opened: RefCell<Vec<PathBuf>>,
+        /// When set, `StubEditor::open` fails instead of recording the hand-off.
+        fail_editor: RefCell<bool>,
     }
 
     struct StubSink(Rc<Recorder>);
@@ -345,8 +354,20 @@ mod tests {
     struct StubEditor(Rc<Recorder>);
     impl EditorHandoff for StubEditor {
         fn open(&mut self, path: &Path) -> Result<(), String> {
+            if *self.0.fail_editor.borrow() {
+                return Err("editor exploded".to_string());
+            }
             self.0.opened.borrow_mut().push(path.to_path_buf());
             Ok(())
+        }
+    }
+
+    /// A `RepoRoot` for a scan root at `path`, for `PollMsg::Roots` tests.
+    fn root(path: &str) -> RepoRoot {
+        RepoRoot {
+            path: PathBuf::from(path),
+            scan_root: PathBuf::from(path),
+            kind: RepoKind::Root,
         }
     }
 
@@ -444,6 +465,32 @@ mod tests {
         assert_eq!(c.repos().len(), 2);
     }
 
+    // ---- PollMsg::Roots --------------------------------------------------------------------
+
+    #[test]
+    fn roots_message_deduplicates_scan_roots_preserving_first_seen_order() {
+        // A NON-CONTIGUOUS duplicate: plain `Vec::dedup()` only removes consecutive runs, so
+        // this must be a first-seen-order dedup, not a sort-then-dedup.
+        let (mut c, _) = controller();
+        c.apply(PollMsg::Roots(vec![
+            root("/w/a"),
+            root("/w/b"),
+            root("/w/a"),
+        ]));
+        assert_eq!(
+            c.scan_roots(),
+            [PathBuf::from("/w/a"), PathBuf::from("/w/b")]
+        );
+    }
+
+    #[test]
+    fn an_empty_roots_message_does_not_wipe_previously_recorded_scan_roots() {
+        let (mut c, _) = controller();
+        c.apply(PollMsg::Roots(vec![root("/w/a")]));
+        c.apply(PollMsg::Roots(vec![]));
+        assert_eq!(c.scan_roots(), [PathBuf::from("/w/a")]);
+    }
+
     // ---- navigation and diff jobs -------------------------------------------------------
 
     #[test]
@@ -500,6 +547,40 @@ mod tests {
         });
         assert!(flatten(c.diff_text()).contains("CURRENT"));
         assert!(!flatten(c.diff_text()).contains("STALE"));
+    }
+
+    #[test]
+    fn a_diff_notice_for_the_current_job_is_forwarded() {
+        let (mut c, rec) = loaded();
+        c.handle(Intent::NextChange);
+        let seq = rec.jobs.borrow().last().expect("a diff job").seq;
+        c.apply_diff(DiffResult {
+            seq,
+            rendered: Rendered {
+                text: ratatui::text::Text::raw("body"),
+                notice: Some("delta is not available — showing plain text".to_string()),
+            },
+        });
+        assert_eq!(
+            c.notice(),
+            Some("delta is not available — showing plain text")
+        );
+    }
+
+    #[test]
+    fn a_diff_notice_for_a_superseded_job_is_not_forwarded() {
+        let (mut c, rec) = loaded();
+        c.handle(Intent::NextChange);
+        c.handle(Intent::NextChange);
+        let stale_seq = rec.jobs.borrow()[0].seq;
+        c.apply_diff(DiffResult {
+            seq: stale_seq,
+            rendered: Rendered {
+                text: ratatui::text::Text::raw("STALE"),
+                notice: Some("must not surface".to_string()),
+            },
+        });
+        assert!(c.notice().is_none());
     }
 
     #[test]
@@ -624,6 +705,23 @@ mod tests {
         let effects = c.handle(Intent::OpenEditor);
         assert_eq!(effects.editor, None);
         assert!(c.notice().is_some());
+    }
+
+    #[test]
+    fn editor_finished_records_the_handed_off_path_and_leaves_no_notice_on_success() {
+        let (mut c, rec) = loaded();
+        c.editor_finished(Path::new("/w/a/x.rs"));
+        assert_eq!(rec.opened.borrow().as_slice(), [PathBuf::from("/w/a/x.rs")]);
+        assert!(c.notice().is_none());
+    }
+
+    #[test]
+    fn editor_finished_surfaces_a_failed_handoff_as_a_notice() {
+        let (mut c, rec) = loaded();
+        *rec.fail_editor.borrow_mut() = true;
+        c.editor_finished(Path::new("/w/a/x.rs"));
+        assert!(rec.opened.borrow().is_empty());
+        assert_eq!(c.notice(), Some("editor exploded"));
     }
 
     #[test]
