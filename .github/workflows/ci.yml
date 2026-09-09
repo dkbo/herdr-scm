@@ -1,0 +1,72 @@
+# CI for herdr-scm.
+#
+# Users install this plugin by building it from source (`herdr-plugin.toml`'s [[build]] step runs
+# `cargo build --release`), so a broken build reaches them directly. Two things follow:
+#
+#  * The test job runs on BOTH `stable` and the declared MSRV (`rust-version` in Cargo.toml), so
+#    the MSRV claim is verified rather than asserted. It is currently accurate — the full suite
+#    passes on 1.88.0.
+#  * There is a weekly schedule. `rust-toolchain.toml` deliberately floats on `stable` (see the
+#    comment there), so a future stable that breaks this crate would otherwise first surface as a
+#    user's failed install. The scheduled run makes it surface here instead, even on a repo with
+#    no recent commits.
+#
+# The lint job pins an exact toolchain: clippy gains lints over time, and an untouched repo going
+# red because a new lint was promoted is noise, not signal. Bumping that pin is a deliberate act.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so a `stable` regression is caught here rather than by a user's install.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: rustfmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `1.88` is the MSRV declared by `rust-version` in Cargo.toml. Keep the two in step.
+        rust: [stable, "1.88"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+      - name: git identity for the fixture builder
+        # tests/common/mod.rs builds real repositories. It sets GIT_CONFIG_GLOBAL=/dev/null and its
+        # own author/committer vars, so this is belt and braces for anything that shells out
+        # without them.
+        run: |
+          git config --global user.name  "ci"
+          git config --global user.email "ci@example.invalid"
+      - name: test
+        run: cargo test --all-targets
+      - name: doc tests
+        run: cargo test --doc

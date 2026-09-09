@@ -1,3 +1,17 @@
+# Deliberately floating on `stable` rather than pinned to an exact version.
+#
+# Users build this plugin from source at install time, so an exact pin would force every one of
+# them to download that specific toolchain even when the one they have works fine. The two things
+# a pin would buy are covered elsewhere instead:
+#
+#  * "too old to compile" is caught by `rust-version` in Cargo.toml (currently 1.88), which cargo
+#    enforces with a clear error, and which CI verifies by running the full suite on that exact
+#    version rather than trusting the declaration;
+#  * "a future stable broke us" is caught by CI's weekly scheduled run on `stable`, so it surfaces
+#    as a red build here rather than as a failed install for a user.
+#
+# If that tradeoff ever stops holding — say a stable regression slips through twice — pin this to
+# an exact version and say so here.
 [toolchain]
 channel = "stable"
 components = ["clippy", "rustfmt"]

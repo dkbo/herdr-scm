@@ -149,3 +149,44 @@ fn the_example_config_still_parses_to_the_built_in_defaults() {
     assert_eq!(settings.diff_tool, defaults.diff_tool);
     assert_eq!(settings.split_threshold_cols, defaults.split_threshold_cols);
 }
+
+#[test]
+fn the_declared_license_actually_ships_with_the_crate() {
+    // `Cargo.toml` claims MIT. A plugin people `git clone` and build has to carry the terms it
+    // claims, so the claim and the file are pinned to each other here.
+    let cargo = std::fs::read_to_string("Cargo.toml").expect("Cargo.toml");
+    assert!(
+        cargo.contains(r#"license = "MIT""#),
+        "this test assumes the crate declares MIT; update it alongside the declaration"
+    );
+    let license = std::fs::read_to_string("LICENSE").expect("LICENSE file is missing");
+    assert!(
+        license.contains("MIT License"),
+        "LICENSE does not carry the MIT terms the crate declares"
+    );
+    assert!(
+        license.contains("Copyright (c)"),
+        "LICENSE has no copyright line"
+    );
+}
+
+#[test]
+fn ci_tests_the_msrv_the_crate_declares() {
+    // Cargo enforces `rust-version` with a clear error, but nothing verifies the number is
+    // truthful. CI does — by running the full suite on exactly that toolchain — which only works
+    // as long as the two stay in step. This pins them, in the same spirit as the manifest-version
+    // test above.
+    let cargo = std::fs::read_to_string("Cargo.toml").expect("Cargo.toml");
+    let msrv = cargo
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("rust-version = "))
+        .map(|v| v.trim_matches('"').to_string())
+        .expect("Cargo.toml declares a rust-version");
+
+    let ci = std::fs::read_to_string(".github/workflows/ci.yml").expect("CI workflow is missing");
+    assert!(
+        ci.contains(&format!("\"{msrv}\"")),
+        "CI's test matrix does not include the declared MSRV {msrv} — the MSRV claim would go \
+         unverified. Update the matrix in .github/workflows/ci.yml."
+    );
+}
