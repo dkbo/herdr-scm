@@ -6,6 +6,7 @@
 pub mod config;
 pub mod context;
 pub mod discover;
+pub mod git;
 pub mod herdr;
 pub mod host;
 pub mod model;
