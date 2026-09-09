@@ -8,6 +8,8 @@ pub mod context;
 pub mod herdr;
 pub mod host;
 pub mod model;
+pub mod porcelain;
+pub mod proc;
 pub mod repo_kind;
 
 use std::process::ExitCode;
