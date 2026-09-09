@@ -221,16 +221,26 @@ impl DiffRenderer for DeltaRenderer {
             .spawn()
             .ok()?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            // A renderer that exits early closes the pipe; that is a miss, not a crash.
-            let _ = stdin.write_all(patch.as_bytes());
-        }
+        // The stdout reader must be draining BEFORE anything is written to stdin: past a few
+        // hundred KB the child's stdout pipe buffer fills, and a child that cannot make
+        // progress on its output stops consuming its input.
         let (tx, rx) = mpsc::channel();
         if let Some(stdout) = child.stdout.take() {
             std::thread::spawn(move || {
                 let mut buf = Vec::new();
                 let _ = stdout.take(MAX_RENDER_OUTPUT).read_to_end(&mut buf);
                 let _ = tx.send(buf);
+            });
+        }
+        // The write also runs on its own thread: even with the reorder above, a renderer that
+        // does not consume stdin as fast as we write it would otherwise still block this
+        // thread past the timeout. Moving `ChildStdin` in means it is dropped — closing the
+        // pipe and signaling EOF — as soon as the write finishes.
+        if let Some(mut stdin) = child.stdin.take() {
+            let patch = patch.to_string();
+            std::thread::spawn(move || {
+                // A renderer that exits early closes the pipe; that is a miss, not a crash.
+                let _ = stdin.write_all(patch.as_bytes());
             });
         }
         let status = crate::proc::wait_until(&mut child, Instant::now() + self.timeout);
@@ -704,6 +714,29 @@ mod tests {
         // `cat` is the simplest faithful stand-in for delta: stdin -> stdout.
         let renderer = DeltaRenderer::new("cat".to_string(), Duration::from_secs(5));
         assert_eq!(renderer.render("+hello\n").as_deref(), Some("+hello\n"));
+    }
+
+    #[test]
+    fn a_large_patch_through_the_external_renderer_does_not_deadlock() {
+        // Regression for the whole-branch-review deadlock: writing the whole patch to the
+        // child's stdin before anything drains its stdout wedges once the pipe buffer (a few
+        // hundred KB) fills. `cat` is the weakest possible reproduction — perfect 1:1
+        // streaming — so a real renderer (e.g. delta) fails at an even smaller size.
+        let patch = "+line of diff content, padded to make this patch large\n".repeat(10_000);
+        assert!(
+            patch.len() > 512 * 1024,
+            "test patch too small: {}",
+            patch.len()
+        );
+        let renderer = DeltaRenderer::new("cat".to_string(), Duration::from_secs(10));
+        let started = Instant::now();
+        let out = renderer.render(&patch);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "renderer took {elapsed:?}"
+        );
+        assert_eq!(out.as_deref(), Some(patch.as_str()));
     }
 
     #[test]

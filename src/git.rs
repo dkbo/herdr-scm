@@ -32,7 +32,8 @@ const MAX_OUTPUT: u64 = 64 * 1024 * 1024;
 pub enum GitError {
     /// The invocation overran its budget and was killed. The row goes `stale` and retries.
     Timeout,
-    /// git ran and exited non-zero; carries its first stderr line.
+    /// git ran and exited non-zero; carries the full stderr (up to 64 KB). `Display` renders
+    /// only its first line — the full text is untrusted and must not reach the screen as-is.
     Failed(String),
     /// git could not be started at all.
     Spawn(String),

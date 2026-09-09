@@ -225,7 +225,7 @@ fn run_job(
             Ok(bytes) => render::prepare_patch(&bytes, caps),
             Err(e) => {
                 return Rendered {
-                    text: ratatui::text::Text::raw(e.to_string()),
+                    text: ratatui::text::Text::raw(render::neutralize_plain_text(&e.to_string())),
                     notice: Some(e.to_string()),
                 };
             }

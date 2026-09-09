@@ -182,6 +182,11 @@ impl Walk<'_> {
         for rel in self.submodules_of(repo) {
             let path = repo.join(&rel);
             if self.fs.dot_git(&path).is_some() {
+                // Deliberately `RepoKind::Submodule`, not `repo_kind::classify(path)`: classify
+                // returns `Nested` for any `.git` DIRECTORY, and an old-style, non-absorbed
+                // submodule has exactly that shape. For a path declared in `.gitmodules`,
+                // `Submodule` is the truthful answer regardless of what `.git` looks like here —
+                // do not "fix" this into calling classify().
                 self.push(&path, RepoKind::Submodule);
             }
         }
