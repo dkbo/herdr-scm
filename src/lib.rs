@@ -3,6 +3,7 @@
 //! Read-only by construction: no module writes files or mutates git state. `git` is
 //! shelled out from `git.rs` alone, and only with read-only subcommands.
 
+pub mod config;
 pub mod model;
 pub mod repo_kind;
 
