@@ -803,3 +803,84 @@ mod tests {
             .join("\n")
     }
 }
+
+/// Ready-made controllers for other modules' tests. Compiled only under `cfg(test)`.
+#[cfg(test)]
+pub mod tests_support {
+    use super::*;
+    use crate::config::Settings;
+    use crate::model::{FileEntry, RepoKind, StatusGroup};
+
+    struct NullSink;
+    impl JobSink for NullSink {
+        fn submit(&self, _job: DiffJob) {}
+    }
+    struct NullClipboard;
+    impl Clipboard for NullClipboard {
+        fn copy(&mut self, _text: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    struct NullHerdr;
+    impl HerdrCli for NullHerdr {
+        fn run_json(&self, _args: &[&str]) -> std::io::Result<String> {
+            Ok(String::new())
+        }
+    }
+    struct NullEditor;
+    impl EditorHandoff for NullEditor {
+        fn open(&mut self, _path: &Path) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn bare() -> Controller {
+        Controller::new(
+            Settings::default(),
+            Deps {
+                sink: Box::new(NullSink),
+                clipboard: Box::new(NullClipboard),
+                herdr: Box::new(NullHerdr),
+                editor: Box::new(NullEditor),
+            },
+        )
+    }
+
+    /// A controller holding one dirty repo, for presenter tests.
+    pub fn loaded_controller() -> Controller {
+        let mut c = bare();
+        c.apply(PollMsg::Snapshot(Snapshot {
+            repos: vec![RepoEntry {
+                path: PathBuf::from("/w/teleagent"),
+                display_name: "teleagent".to_string(),
+                rel_path: String::new(),
+                kind: RepoKind::Root,
+                branch: Some("master".to_string()),
+                ahead: Some(6),
+                behind: Some(1),
+                groups: vec![StatusGroup {
+                    kind: GroupKind::Changes,
+                    files: vec![FileEntry {
+                        path: "e2e/specs/07-authz.spec.ts".to_string(),
+                        status: 'M',
+                        orig_path: None,
+                    }],
+                }],
+                ..RepoEntry::blank()
+            }],
+            generation: 1,
+        }));
+        c
+    }
+
+    /// A controller that found nothing, for the empty-state test.
+    pub fn empty_controller() -> Controller {
+        let mut c = bare();
+        c.set_scan_roots(vec![PathBuf::from("/w")]);
+        c.apply(PollMsg::Snapshot(Snapshot {
+            repos: Vec::new(),
+            generation: 1,
+        }));
+        c
+    }
+}

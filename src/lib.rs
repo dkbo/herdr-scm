@@ -16,6 +16,7 @@ pub mod layout;
 pub mod model;
 pub mod poller;
 pub mod porcelain;
+pub mod presenter;
 pub mod proc;
 pub mod render;
 pub mod repo_kind;
