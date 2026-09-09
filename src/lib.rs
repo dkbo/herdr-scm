@@ -13,6 +13,7 @@ pub mod input;
 pub mod intent;
 pub mod layout;
 pub mod model;
+pub mod poller;
 pub mod porcelain;
 pub mod proc;
 pub mod render;
