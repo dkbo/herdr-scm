@@ -1,0 +1,44 @@
+# herdr-plugin.toml — manifest for herdr-scm.
+#
+# A read-only, multi-repo source-control overview: every git repo under the current herdr
+# workspace, its branch and ahead/behind, its changed files, and a diff for the selected one.
+# The panel appears ONLY in response to an explicit action (its keybinding) — there are no
+# event hooks and no automatic invocation.
+#
+# v1 is Linux-only: no macOS/Windows build script and no `-windows` action ids. `platforms`
+# keeps the field in place for when that changes.
+
+id = "herdr-scm"
+name = "herdr-scm"
+version = "0.1.0"
+description = "A read-only, multi-repo source-control overview panel for the current herdr workspace."
+# 0.9.0 is where `herdr pane list --workspace <id>` and the `pane list` payload this plugin
+# parses were verified. It is also the version the plugin was developed against.
+min_herdr_version = "0.9.0"
+platforms = ["linux"]
+
+# Install-time build. v1 compiles from source — no prebuilt download, no network.
+[[build]]
+command = ["/bin/sh", "scripts/build.sh"]
+
+# The panel. herdr performs the split placement on launch; the actions below summon it.
+[[panes]]
+id = "scm"
+title = "SCM"
+placement = "split"
+command = ["./target/release/herdr-scm"]
+
+# The action that summons the panel beside the current work.
+[[actions]]
+id = "open-scm"
+title = "Open SCM overview"
+description = "Open the read-only multi-repo source-control overview in a split pane."
+command = ["bash", "scripts/open-scm.sh"]
+
+# The same panel in its own tab. Idempotent across the tabs of the current workspace: switches
+# to an existing panel rather than duplicating it, and toggles off when already on it.
+[[actions]]
+id = "open-scm-tab"
+title = "Open SCM overview (tab)"
+description = "Open the source-control overview in its own tab (switch to it if already open)."
+command = ["bash", "scripts/open-scm-tab.sh"]

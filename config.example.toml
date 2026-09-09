@@ -1,0 +1,36 @@
+# herdr-scm configuration — copy to $HERDR_PLUGIN_CONFIG_DIR/config.toml
+# (find it with: herdr plugin config-dir herdr-scm), or to
+# ~/.config/herdr-scm/config.toml.
+#
+# The file is READ-ONLY to herdr-scm: it is never written back. A parse error degrades the
+# WHOLE file to the defaults below rather than failing to start.
+
+# Seconds between status snapshots. 0 turns automatic polling off — press `r` to refresh.
+poll_interval_secs   = 3
+
+# Re-walk the filesystem for the repo list every N poll rounds. The walk is the expensive
+# half, so it runs far less often than the status query.
+rescan_every         = 10
+
+# How many directory levels below each scan start to search for nested repos.
+scan_depth           = 4
+
+# Directory names pruned unconditionally, before any gitignore rule is consulted. Setting this
+# REPLACES the list; `[]` prunes nothing.
+scan_excludes        = ["node_modules", "target", "vendor", ".venv", "dist"]
+
+# The external diff renderer. "" shows plain text. The program receives the patch on stdin and
+# its stdout is displayed (after ANSI neutralization).
+diff_tool            = "delta"
+
+# At or above this pane width the panel splits left/right (tree 40% / diff 60%); below it the
+# panel stacks, tree on top.
+split_threshold_cols = 120
+
+# Rebind any action. A value REPLACES that action's default keys and takes the key from
+# whichever action held it. `Esc` always closes an overlay regardless of what is set here.
+# Action names: nav_down nav_up activate focus_toggle next_change prev_change refresh
+#               toggle_all zoom copy_path open_editor help close quit
+[keys]
+# refresh = "g"
+# nav_up  = ["w", "Up"]
