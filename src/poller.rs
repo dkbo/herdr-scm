@@ -142,6 +142,11 @@ pub struct DiffResult {
 /// thread.
 pub trait JobSink {
     fn submit(&self, job: DiffJob);
+    /// Whatever has finished since the last call. Defaults to nothing, so a test stub does not
+    /// have to implement it.
+    fn drain(&self) -> Vec<DiffResult> {
+        Vec::new()
+    }
 }
 
 /// The background diff renderer.

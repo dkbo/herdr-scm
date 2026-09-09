@@ -305,6 +305,12 @@ impl Controller {
             self.notice = Some(e);
         }
     }
+
+    /// Drain whatever the render worker has finished. Empty unless a draining sink was
+    /// injected — the stub sinks used in tests have nothing to drain.
+    pub fn drain_diffs(&self) -> Vec<DiffResult> {
+        self.deps.sink.drain()
+    }
 }
 
 #[cfg(test)]
