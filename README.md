@@ -1,5 +1,8 @@
 # herdr-scm
 
+[![CI](https://github.com/dkbo/herdr-scm/actions/workflows/ci.yml/badge.svg)](https://github.com/dkbo/herdr-scm/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A read-only, multi-repo source-control overview panel for [herdr](https://herdr.dev) — the
 equivalent of VS Code's Source Control sidebar (Changes tree + diff), but for every git repo
 under your current herdr workspace at once. At a glance: every repo's branch and ahead/behind
@@ -37,8 +40,7 @@ Narrow pane (below the threshold) — tree stacked above diff:
 ## Install
 
 ```bash
-git clone <this repo> ~/project/herdr-plugin2
-herdr plugin link ~/project/herdr-plugin2
+herdr plugin install dkbo/herdr-scm
 ```
 
 Then bind a key in `~/.config/herdr/config.toml`:
@@ -53,13 +55,41 @@ key = "prefix+shift+g"
 action = "open-scm-tab"
 ```
 
-Building needs Rust (https://rustup.rs). After a source change, `cargo build --release` is
-enough — the linked plugin picks it up on the next launch.
+The install compiles the plugin from source — there is no prebuilt download and no network
+access beyond fetching crates. The first build resolves around 200 crates and takes a few
+minutes; after that it is incremental. See [Requirements](#requirements) for what you need on
+the machine before installing.
 
 `open-scm` opens (or focuses, or closes) the panel as a split alongside your current pane,
 scoped to the current tab. `open-scm-tab` opens it in its own tab instead: pressing it again
 switches to an already-open panel elsewhere in the same workspace rather than duplicating it,
 and closes it when it's already focused.
+
+### Requirements
+
+| What | Needed for | Where it comes from |
+|---|---|---|
+| herdr ≥ 0.9.0 | the host this plugin is a pane inside; 0.9.0 is where the `herdr pane list --workspace <id>` payload it parses was verified | <https://herdr.dev> |
+| Rust ≥ 1.88 with `cargo` | the install-time build (`cargo build --release`). Missing cargo fails the install with a message rather than a broken plugin | <https://rustup.rs> |
+| `git` | every branch, ahead/behind count and diff — the panel shells out to git and never reimplements it | <https://git-scm.com> |
+| `delta` | optional, but it is the default `diff_tool`. Without it, set `diff_tool = ""` for plain-text diffs | [dandavison/delta](https://github.com/dandavison/delta) |
+| `$EDITOR` | optional — the `e` key hands the selected file to it | your shell environment |
+| `bash` | the two launcher scripts the manifest's actions run | preinstalled on Linux |
+
+Linux only in v1 (developed under WSL2); the manifest declares `platforms = ["linux"]`.
+
+### Building from a clone
+
+For working on the plugin itself, link the checkout instead of installing from GitHub:
+
+```bash
+git clone https://github.com/dkbo/herdr-scm.git
+cd herdr-scm
+herdr plugin link "$PWD"
+```
+
+After a source change, `cargo build --release` is enough — the linked plugin picks up the new
+binary on the next launch.
 
 ## Keybindings
 
@@ -106,3 +136,29 @@ failing to start.
 - **macOS or Windows.** v1 is Linux-only (developed under WSL2). The manifest keeps the
   `platforms` field in place for when that changes, but there is no other-platform build script
   or `-windows` action yet.
+
+## Third-party code and attribution
+
+The panel is a [ratatui](https://github.com/ratatui/ratatui) TUI over `git`'s own output. Credit
+where it's due — these are the crates herdr-scm depends on directly:
+
+| Crate | What it does here | License |
+|---|---|---|
+| [ratatui](https://github.com/ratatui/ratatui) | the whole terminal UI: layout, widgets, the frame loop | MIT |
+| [crossterm](https://github.com/crossterm-rs/crossterm) | the terminal backend — raw mode, the alternate screen, key events | MIT |
+| [ansi-to-tui](https://github.com/ratatui/ansi-to-tui) | turns `delta`'s coloured patch output into styled ratatui text | MIT |
+| [ignore](https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore) | the gitignore matcher that prunes the repo walk (from ripgrep) | Unlicense OR MIT |
+| [serde](https://github.com/serde-rs/serde) + [serde_json](https://github.com/serde-rs/json) | parsing the `herdr pane list` payload | MIT OR Apache-2.0 |
+| [toml](https://github.com/toml-rs/toml) | reading `config.toml` | MIT OR Apache-2.0 |
+| [tempfile](https://github.com/Stebalien/tempfile) | dev-dependency only — the tests build real git repositories in temp dirs | MIT OR Apache-2.0 |
+
+Diffs are rendered by [delta](https://github.com/dandavison/delta) (MIT) when it is installed,
+and the host itself is [herdr](https://github.com/herdrdev/herdr) (Apache-2.0). Neither is
+bundled — herdr-scm runs whichever copy is on your machine.
+
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) lists every crate in the resolved dependency
+graph with its version, license and source, plus the external programs above.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
