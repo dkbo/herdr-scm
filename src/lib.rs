@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod context;
+pub mod herdr;
 pub mod host;
 pub mod model;
 pub mod repo_kind;
