@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod context;
+pub mod controller;
 pub mod discover;
 pub mod git;
 pub mod herdr;
