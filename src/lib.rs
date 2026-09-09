@@ -9,6 +9,7 @@ pub mod discover;
 pub mod git;
 pub mod herdr;
 pub mod host;
+pub mod layout;
 pub mod model;
 pub mod porcelain;
 pub mod proc;
