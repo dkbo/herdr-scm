@@ -4,6 +4,8 @@
 //! shelled out from `git.rs` alone, and only with read-only subcommands.
 
 pub mod config;
+pub mod context;
+pub mod host;
 pub mod model;
 pub mod repo_kind;
 
