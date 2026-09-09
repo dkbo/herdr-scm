@@ -149,8 +149,8 @@ pub fn pane_cwds(pane_list_json: &str, workspace_id: Option<&str>) -> Vec<PathBu
         .filter_map(|p| {
             p.cwd
                 .as_deref()
-                .or(p.foreground_cwd.as_deref())
                 .filter(|s| !s.is_empty())
+                .or_else(|| p.foreground_cwd.as_deref().filter(|s| !s.is_empty()))
         })
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
@@ -215,6 +215,22 @@ mod tests {
             .map(|(pane_id, cwd, ws, focused)| {
                 format!(
                     r#"{{"pane_id":"{pane_id}","cwd":"{cwd}","foreground_cwd":"{cwd}","workspace_id":"{ws}","tab_id":"{ws}:t1","focused":{focused}}}"#
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"id":"cli:pane:list","result":{{"panes":[{}]}}}}"#,
+            panes.join(",")
+        )
+    }
+
+    /// Pane-list helper for testing with distinct cwd and foreground_cwd values.
+    fn pane_list_custom(entries: &[(&str, &str, &str, &str, bool)]) -> String {
+        let panes: Vec<String> = entries
+            .iter()
+            .map(|(pane_id, cwd, foreground_cwd, ws, focused)| {
+                format!(
+                    r#"{{"pane_id":"{pane_id}","cwd":"{cwd}","foreground_cwd":"{foreground_cwd}","workspace_id":"{ws}","tab_id":"{ws}:t1","focused":{focused}}}"#
                 )
             })
             .collect();
@@ -333,6 +349,20 @@ mod tests {
         assert!(pane_cwds("", Some("wA")).is_empty());
         assert!(pane_cwds("not json", Some("wA")).is_empty());
         assert!(pane_cwds(r#"{"result":{}}"#, Some("wA")).is_empty());
+    }
+
+    #[test]
+    fn empty_cwd_falls_back_to_foreground_cwd() {
+        // When cwd is empty but foreground_cwd is set, the foreground_cwd should be used.
+        let json = pane_list_custom(&[("wA:p1", "", "/w/a", "wA", true)]);
+        assert_eq!(pane_cwds(&json, Some("wA")), vec![PathBuf::from("/w/a")]);
+    }
+
+    #[test]
+    fn cwd_takes_precedence_over_foreground_cwd() {
+        // When both cwd and foreground_cwd are present and different, cwd wins.
+        let json = pane_list_custom(&[("wA:p1", "/w/a", "/w/b", "wA", true)]);
+        assert_eq!(pane_cwds(&json, Some("wA")), vec![PathBuf::from("/w/a")]);
     }
 
     // ---- panes_in_workspace ------------------------------------------------------------------
