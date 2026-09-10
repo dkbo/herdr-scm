@@ -9,11 +9,12 @@ use crate::input::{Bindings, REGISTRY, key_label};
 use crate::layout::{Orientation, geometry};
 use crate::model::{FileEntry, RepoEntry, StatusGroup};
 use crate::render::neutralize_plain_text;
+use crate::theme::{self, Role};
 use crate::tree::{Row, RowId};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use std::path::PathBuf;
 
@@ -26,53 +27,141 @@ pub struct Hits {
     pub rows: Vec<(u16, usize)>,
 }
 
+/// One styled run inside a row.
+///
+/// It carries a semantic [`Role`], never a `Style`: the palette lives in `theme.rs`, and nothing
+/// in this module knows what colour anything is. That is also what keeps every layout and content
+/// assertion here a plain string test — see [`plain`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Segment {
+    pub text: String,
+    pub role: Role,
+}
+
+fn seg(text: impl Into<String>, role: Role) -> Segment {
+    Segment {
+        text: text.into(),
+        role,
+    }
+}
+
+/// A row's characters with its styling dropped — what the content tests assert on.
+pub fn plain(segments: &[Segment]) -> String {
+    segments.iter().map(|s| s.text.as_str()).collect()
+}
+
+/// Resolve a row's roles into a drawable line, with `base` patched over each segment's own style.
+///
+/// `base` is how the cursor row gets its selection treatment without any segment losing its
+/// semantic colour: `Style::patch` unions modifiers and only fills a colour the segment left
+/// unset, and `theme::selection` deliberately sets no colours at all.
+fn to_line(segments: Vec<Segment>, base: Style) -> Line<'static> {
+    Line::from(
+        segments
+            .into_iter()
+            .map(|s| Span::styled(s.text, theme::style(s.role).patch(base)))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Prefix a row's segments with `n` spaces of tree indentation.
+fn indent(n: usize, mut segments: Vec<Segment>) -> Vec<Segment> {
+    segments.insert(0, seg(" ".repeat(n), Role::Chrome));
+    segments
+}
+
 /// The title bar's text.
-pub fn title((repos, dirty): (usize, usize)) -> String {
+pub fn title((repos, dirty): (usize, usize)) -> Vec<Segment> {
     let noun = if repos == 1 { "repo" } else { "repos" };
-    format!("SCM — {repos} {noun} · {dirty} dirty")
+    vec![
+        seg("SCM", Role::RepoName),
+        seg(format!(" — {repos} {noun} · "), Role::Chrome),
+        // A clean tree should have nothing lit up in the title.
+        seg(
+            format!("{dirty} dirty"),
+            if dirty > 0 {
+                Role::DirtyCount
+            } else {
+                Role::Chrome
+            },
+        ),
+    ]
 }
 
 /// A repo row (spec §5.2): marker, name, relative path, branch, ahead/behind, kind, count.
-pub fn repo_line(repo: &RepoEntry, collapsed: bool) -> String {
+pub fn repo_line(repo: &RepoEntry, collapsed: bool) -> Vec<Segment> {
     let marker = if collapsed { '▸' } else { '▾' };
-    let mut parts = vec![format!("{marker} {}", safe(&repo.display_name))];
+    let mut out = vec![
+        seg(format!("{marker} "), Role::Marker),
+        seg(safe(&repo.display_name), Role::RepoName),
+    ];
     if !repo.rel_path.is_empty() {
-        parts.push(safe(&repo.rel_path));
+        out.push(gap());
+        out.push(seg(safe(&repo.rel_path), Role::RelPath));
     }
     if let Some(branch) = &repo.branch {
-        parts.push(safe(branch));
+        out.push(gap());
+        out.push(seg(safe(branch), Role::Branch));
     }
-    // No upstream means no arrows at all; `↑0 ↓0` means level with one.
+    // No upstream means no arrows at all; `↑0 ↓0` means level with one. Each side is lit
+    // independently, because being level one way is not being level both ways.
     if let (Some(ahead), Some(behind)) = (repo.ahead, repo.behind) {
-        parts.push(format!("↑{ahead} ↓{behind}"));
+        out.push(gap());
+        out.push(seg(format!("↑{ahead}"), sync_role(ahead)));
+        out.push(seg(" ", Role::Chrome));
+        out.push(seg(format!("↓{behind}"), sync_role(behind)));
     }
-    parts.push(repo.kind.label().to_string());
+    out.push(gap());
+    out.push(seg(repo.kind.label(), Role::Kind));
     if repo.stale {
-        parts.push("stale".to_string());
+        out.push(gap());
+        out.push(seg("stale", Role::Stale));
     }
     if let Some(error) = &repo.error {
-        parts.push(format!("! {}", safe(error)));
+        out.push(gap());
+        out.push(seg(format!("! {}", safe(error)), Role::Error));
     }
     let count = repo.dirty_count();
     if count > 0 {
-        parts.push(count.to_string());
+        out.push(gap());
+        out.push(seg(count.to_string(), Role::DirtyCount));
     }
-    parts.join("  ")
+    out
+}
+
+/// The two-space separator between a repo row's fields.
+fn gap() -> Segment {
+    seg("  ", Role::Chrome)
+}
+
+/// Lit when there is something to act on, receded when level with the upstream.
+fn sync_role(n: u32) -> Role {
+    if n > 0 { Role::Sync } else { Role::SyncIdle }
 }
 
 /// A group row: its title and how many files it holds.
-pub fn group_line(group: &StatusGroup, collapsed: bool) -> String {
+pub fn group_line(group: &StatusGroup, collapsed: bool) -> Vec<Segment> {
     let marker = if collapsed { '▸' } else { '▾' };
-    format!("{marker} {}  {}", group.kind.title(), group.files.len())
+    vec![
+        seg(format!("{marker} "), Role::Marker),
+        seg(group.kind.title(), Role::GroupTitle),
+        seg("  ", Role::Chrome),
+        seg(group.files.len().to_string(), Role::GroupCount),
+    ]
 }
 
 /// A file row: the status letter and the repo-relative path.
-pub fn file_line(file: &FileEntry) -> String {
-    let path = match &file.orig_path {
-        Some(orig) => format!("{} ← {}", safe(&file.path), safe(orig)),
-        None => safe(&file.path),
-    };
-    format!("{} {path}", file.status)
+pub fn file_line(file: &FileEntry) -> Vec<Segment> {
+    let mut out = vec![
+        seg(file.status.to_string(), Role::Status(file.status)),
+        seg(" ", Role::Chrome),
+        seg(safe(&file.path), Role::Path),
+    ];
+    if let Some(orig) = &file.orig_path {
+        out.push(seg(" ← ", Role::Chrome));
+        out.push(seg(safe(orig), Role::OrigPath));
+    }
+    out
 }
 
 /// The empty state (spec §5.4): why it is empty, where we looked, and how to retry.
@@ -126,8 +215,7 @@ pub fn draw(frame: &mut Frame, controller: &Controller, bindings: &Bindings) -> 
         area.height.saturating_sub(1),
     );
     frame.render_widget(
-        Paragraph::new(title(controller.title_counts()))
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(to_line(title(controller.title_counts()), Style::default())),
         title_area,
     );
     if body.height == 0 {
@@ -214,10 +302,10 @@ fn windowed_rows(
         let Some(repo) = repos.get(row.repo_idx) else {
             continue;
         };
-        let text = match &row.id {
+        let segments = match &row.id {
             RowId::Repo { .. } => repo_line(repo, is_collapsed(&row.id)),
             RowId::Group { .. } => match row.group_idx.and_then(|i| repo.groups.get(i)) {
-                Some(group) => format!("  {}", group_line(group, is_collapsed(&row.id))),
+                Some(group) => indent(2, group_line(group, is_collapsed(&row.id))),
                 None => continue,
             },
             RowId::File { .. } => {
@@ -226,14 +314,14 @@ fn windowed_rows(
                     .and_then(|g| repo.groups.get(g))
                     .and_then(|group| row.file_idx.and_then(|f| group.files.get(f)));
                 match file {
-                    Some(file) => format!("    {}", file_line(file)),
+                    Some(file) => indent(4, file_line(file)),
                     None => continue,
                 }
             }
         };
         let index = first + offset;
-        let style = if index == cursor {
-            Style::default().add_modifier(Modifier::REVERSED)
+        let base = if index == cursor {
+            theme::selection(true)
         } else {
             Style::default()
         };
@@ -241,7 +329,7 @@ fn windowed_rows(
         // `offset` counts rows skipped by a `continue` above, `lines.len()` does not.
         let y = base_y + lines.len() as u16;
         hits.push((y, index));
-        lines.push(Line::styled(text, style));
+        lines.push(to_line(segments, base));
     }
     (lines, hits)
 }
@@ -348,19 +436,19 @@ mod tests {
 
     #[test]
     fn the_title_reports_the_repo_and_dirty_counts() {
-        assert_eq!(title((6, 3)), "SCM — 6 repos · 3 dirty");
+        assert_eq!(plain(&title((6, 3))), "SCM — 6 repos · 3 dirty");
     }
 
     #[test]
     fn the_title_is_singular_for_one_repo() {
-        assert_eq!(title((1, 0)), "SCM — 1 repo · 0 dirty");
+        assert_eq!(plain(&title((1, 0))), "SCM — 1 repo · 0 dirty");
     }
 
     // ---- the repo row (spec §5.2) ------------------------------------------------------------
 
     #[test]
     fn a_repo_row_shows_name_branch_ahead_behind_kind_and_count() {
-        let line = repo_line(&entry(), false);
+        let line = plain(&repo_line(&entry(), false));
         for part in ["teleagent", "master", "↑6", "↓1", "root", "1"] {
             assert!(line.contains(part), "{part:?} missing from {line:?}");
         }
@@ -368,12 +456,12 @@ mod tests {
 
     #[test]
     fn a_repo_row_shows_its_relative_path_except_at_the_scan_start() {
-        assert!(!repo_line(&entry(), false).contains('/'));
+        assert!(!plain(&repo_line(&entry(), false)).contains('/'));
         let nested = RepoEntry {
             rel_path: "sub/pencil".to_string(),
             ..entry()
         };
-        assert!(repo_line(&nested, false).contains("sub/pencil"));
+        assert!(plain(&repo_line(&nested, false)).contains("sub/pencil"));
     }
 
     #[test]
@@ -384,7 +472,7 @@ mod tests {
             behind: None,
             ..entry()
         };
-        let line = repo_line(&no_upstream, false);
+        let line = plain(&repo_line(&no_upstream, false));
         assert!(!line.contains('↑'), "{line}");
         assert!(!line.contains('↓'), "{line}");
 
@@ -393,7 +481,7 @@ mod tests {
             behind: Some(0),
             ..entry()
         };
-        assert!(repo_line(&level, false).contains("↑0"));
+        assert!(plain(&repo_line(&level, false)).contains("↑0"));
     }
 
     #[test]
@@ -402,15 +490,15 @@ mod tests {
             groups: vec![],
             ..entry()
         };
-        let line = repo_line(&clean, false);
+        let line = plain(&repo_line(&clean, false));
         assert!(line.contains("teleagent"), "{line}");
         assert!(!line.ends_with('0'), "{line}");
     }
 
     #[test]
     fn the_expansion_marker_reflects_the_collapsed_state() {
-        assert!(repo_line(&entry(), false).starts_with('▾'));
-        assert!(repo_line(&entry(), true).starts_with('▸'));
+        assert!(plain(&repo_line(&entry(), false)).starts_with('▾'));
+        assert!(plain(&repo_line(&entry(), true)).starts_with('▸'));
     }
 
     #[test]
@@ -419,7 +507,7 @@ mod tests {
             error: Some("fatal: not a git repository".to_string()),
             ..entry()
         };
-        let line = repo_line(&broken, false);
+        let line = plain(&repo_line(&broken, false));
         assert!(line.contains('!'), "{line}");
         assert!(line.contains("not a git repository"), "{line}");
     }
@@ -430,7 +518,7 @@ mod tests {
             stale: true,
             ..entry()
         };
-        assert!(repo_line(&stale, false).contains("stale"));
+        assert!(plain(&repo_line(&stale, false)).contains("stale"));
     }
 
     #[test]
@@ -441,7 +529,7 @@ mod tests {
             error: Some("bad\nlines".to_string()),
             ..entry()
         };
-        let line = repo_line(&hostile, false);
+        let line = plain(&repo_line(&hostile, false));
         assert_eq!(line.lines().count(), 1, "{line:?}");
         assert!(!line.contains('\x1b'), "{line:?}");
     }
@@ -451,7 +539,7 @@ mod tests {
     #[test]
     fn a_group_row_shows_its_title_and_file_count() {
         let group = &entry().groups[0];
-        let line = group_line(group, false);
+        let line = plain(&group_line(group, false));
         assert!(line.contains("Changes"), "{line}");
         assert!(line.contains('1'), "{line}");
     }
@@ -459,7 +547,7 @@ mod tests {
     #[test]
     fn a_file_row_shows_its_status_letter_and_repo_relative_path() {
         let file = &entry().groups[0].files[0];
-        let line = file_line(file);
+        let line = plain(&file_line(file));
         assert!(line.starts_with('M'), "{line}");
         assert!(line.contains("e2e/specs/07-authz.spec.ts"), "{line}");
     }
@@ -471,7 +559,7 @@ mod tests {
             status: 'R',
             orig_path: Some("old.rs".to_string()),
         };
-        let line = file_line(&renamed);
+        let line = plain(&file_line(&renamed));
         assert!(line.contains("old.rs"), "{line}");
         assert!(line.contains("new.rs"), "{line}");
     }
@@ -483,9 +571,144 @@ mod tests {
             status: '?',
             orig_path: None,
         };
-        let line = file_line(&hostile);
+        let line = plain(&file_line(&hostile));
         assert_eq!(line.lines().count(), 1, "{line:?}");
         assert!(!line.contains('\x1b'), "{line:?}");
+    }
+
+    // ---- semantic roles ------------------------------------------------------------------
+
+    /// The role carried by the first segment whose text is exactly `text`.
+    fn role_of(segments: &[Segment], text: &str) -> Role {
+        segments
+            .iter()
+            .find(|s| s.text == text)
+            .unwrap_or_else(|| panic!("no segment reads exactly {text:?} in {segments:?}"))
+            .role
+    }
+
+    #[test]
+    fn plain_reproduces_exactly_what_the_string_version_rendered() {
+        // The one guarantee that keeps every content assertion in this module honest.
+        assert_eq!(
+            plain(&repo_line(&entry(), false)),
+            "▾ teleagent  master  ↑6 ↓1  root  1"
+        );
+        assert_eq!(
+            plain(&group_line(&entry().groups[0], false)),
+            "▾ Changes  1"
+        );
+        assert_eq!(
+            plain(&file_line(&entry().groups[0].files[0])),
+            "M e2e/specs/07-authz.spec.ts"
+        );
+        assert_eq!(plain(&title((6, 3))), "SCM — 6 repos · 3 dirty");
+    }
+
+    #[test]
+    fn each_field_of_a_repo_row_carries_its_own_role() {
+        let segs = repo_line(&entry(), false);
+        assert_eq!(role_of(&segs, "teleagent"), Role::RepoName);
+        assert_eq!(role_of(&segs, "master"), Role::Branch);
+        assert_eq!(role_of(&segs, "root"), Role::Kind);
+        assert_eq!(role_of(&segs, "1"), Role::DirtyCount);
+    }
+
+    #[test]
+    fn a_relative_path_is_structure_rather_than_identity() {
+        let nested = RepoEntry {
+            rel_path: "sub/pencil".to_string(),
+            ..entry()
+        };
+        assert_eq!(
+            role_of(&repo_line(&nested, false), "sub/pencil"),
+            Role::RelPath
+        );
+    }
+
+    #[test]
+    fn an_arrow_at_zero_recedes_while_a_pending_one_stays_lit() {
+        let segs = repo_line(&entry(), false); // ahead 6, behind 1
+        assert_eq!(role_of(&segs, "↑6"), Role::Sync);
+        assert_eq!(role_of(&segs, "↓1"), Role::Sync);
+
+        let level = RepoEntry {
+            ahead: Some(0),
+            behind: Some(0),
+            ..entry()
+        };
+        let segs = repo_line(&level, false);
+        assert_eq!(role_of(&segs, "↑0"), Role::SyncIdle);
+        assert_eq!(role_of(&segs, "↓0"), Role::SyncIdle);
+
+        // Each side recedes on its own: being level one way is not being level both ways.
+        let ahead_only = RepoEntry {
+            ahead: Some(2),
+            behind: Some(0),
+            ..entry()
+        };
+        let segs = repo_line(&ahead_only, false);
+        assert_eq!(role_of(&segs, "↑2"), Role::Sync);
+        assert_eq!(role_of(&segs, "↓0"), Role::SyncIdle);
+    }
+
+    #[test]
+    fn a_failing_repos_message_carries_the_error_role() {
+        let broken = RepoEntry {
+            error: Some("fatal: not a git repository".to_string()),
+            ..entry()
+        };
+        let segs = repo_line(&broken, false);
+        assert_eq!(role_of(&segs, "! fatal: not a git repository"), Role::Error);
+    }
+
+    #[test]
+    fn a_stale_repo_carries_the_stale_role() {
+        let stale = RepoEntry {
+            stale: true,
+            ..entry()
+        };
+        assert_eq!(role_of(&repo_line(&stale, false), "stale"), Role::Stale);
+    }
+
+    #[test]
+    fn a_status_letter_carries_its_own_letters_role() {
+        for code in ['M', 'A', 'D', 'R', 'C', 'U', '?'] {
+            let file = FileEntry {
+                path: "x".to_string(),
+                status: code,
+                orig_path: None,
+            };
+            let segs = file_line(&file);
+            assert_eq!(role_of(&segs, &code.to_string()), Role::Status(code));
+            assert_eq!(role_of(&segs, "x"), Role::Path);
+        }
+    }
+
+    #[test]
+    fn the_place_a_rename_came_from_is_dimmer_than_where_it_went() {
+        let renamed = FileEntry {
+            path: "new.rs".to_string(),
+            status: 'R',
+            orig_path: Some("old.rs".to_string()),
+        };
+        let segs = file_line(&renamed);
+        assert_eq!(role_of(&segs, "new.rs"), Role::Path);
+        assert_eq!(role_of(&segs, "old.rs"), Role::OrigPath);
+    }
+
+    #[test]
+    fn a_group_title_outranks_its_count() {
+        let segs = group_line(&entry().groups[0], false);
+        assert_eq!(role_of(&segs, "Changes"), Role::GroupTitle);
+        assert_eq!(role_of(&segs, "1"), Role::GroupCount);
+    }
+
+    #[test]
+    fn a_clean_tree_does_not_light_up_the_dirty_count_in_the_title() {
+        assert_eq!(role_of(&title((3, 0)), "0 dirty"), Role::Chrome);
+        assert_eq!(role_of(&title((3, 2)), "2 dirty"), Role::DirtyCount);
+        assert_eq!(role_of(&title((3, 2)), "SCM"), Role::RepoName);
     }
 
     // ---- the empty state (spec §5.4) ----------------------------------------------------------
