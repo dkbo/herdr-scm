@@ -203,20 +203,84 @@ pub fn diff_title(selected: Option<&Row>, repos: &[RepoEntry], width: u16) -> St
     truncate_left(&text, width as usize)
 }
 
-/// Keep the last `width` characters, marking the cut with a leading `…`.
+/// How many terminal columns `text` occupies once drawn.
+///
+/// Measured with ratatui's own machinery (`Span::width`), so this is the renderer's answer by
+/// construction rather than a second opinion that can drift from it — including for the `\t`
+/// that `safe()` leaves in place, which ratatui draws no column for at all.
+fn display_width(text: &str) -> usize {
+    Span::raw(text).width()
+}
+
+/// Which end of a string a cut keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    /// Keep the head, drop the tail — a notice, which reads from its first word.
+    Head,
+    /// Keep the tail, drop the head — a path, whose file name is its most useful part.
+    Tail,
+}
+
+/// Take whole graphemes from one end of `text` for as long as they fit in `width` terminal
+/// columns, and report how many columns the run kept actually occupies.
+///
+/// The one measuring helper behind both the diff title and the status bar, because both were
+/// counting characters where the terminal counts columns. Two properties do the work:
+///
+/// * Whole graphemes, so a cut can never split a double-width character in half. When one
+///   straddles the boundary the run comes back a column short of `width` — the caller is told the
+///   real figure so it can pad rather than assume.
+/// * ratatui's own grapheme walk, which drops any grapheme holding a control character exactly
+///   as the renderer does. `safe()` deliberately keeps `\t` and the renderer draws no column for
+///   it, so dropping it here is what keeps the measurement and the drawn row the same length.
+fn take_columns(text: &str, width: usize, keep: Keep) -> (String, usize) {
+    fn scan<'a>(graphemes: impl Iterator<Item = &'a str>, width: usize) -> (usize, usize) {
+        let mut taken = 0;
+        let mut used = 0;
+        for grapheme in graphemes {
+            let columns = display_width(grapheme);
+            if used + columns > width {
+                break;
+            }
+            used += columns;
+            taken += 1;
+        }
+        (taken, used)
+    }
+
+    let span = Span::raw(text);
+    let graphemes: Vec<&str> = span
+        .styled_graphemes(Style::default())
+        .map(|g| g.symbol)
+        .collect();
+    let (taken, used) = match keep {
+        Keep::Head => scan(graphemes.iter().copied(), width),
+        Keep::Tail => scan(graphemes.iter().rev().copied(), width),
+    };
+    let kept = match keep {
+        Keep::Head => &graphemes[..taken],
+        Keep::Tail => &graphemes[graphemes.len() - taken..],
+    };
+    (kept.concat(), used)
+}
+
+/// Keep the last `width` COLUMNS of `text`, marking the cut with a leading `…`.
+///
+/// Columns rather than characters, because columns are what ratatui clips and pads by. Counting
+/// characters judged a CJK path to fit a pane half its rendered size, so it was returned whole
+/// and the renderer clipped the RIGHT — losing the file name and the `…` that says a path was
+/// cut, which inverts spec §8.1's whole point.
 fn truncate_left(text: &str, width: usize) -> String {
-    let count = text.chars().count();
-    if count <= width {
+    if display_width(text) <= width {
         return text.to_string();
     }
-    match width {
-        0 => String::new(),
-        1 => "…".to_string(),
-        _ => {
-            let tail: String = text.chars().skip(count - (width - 1)).collect();
-            format!("…{tail}")
-        }
+    if width == 0 {
+        return String::new();
     }
+    // The `…` costs one of the columns, and it is the part that must survive: a one-column title
+    // says "there is more path here than fits" and nothing else.
+    let (tail, _) = take_columns(text, width - 1, Keep::Tail);
+    format!("…{tail}")
 }
 
 /// The help overlay: every action with its effective keys.
@@ -253,27 +317,30 @@ pub fn help_width(lines: &[String], available: u16) -> u16 {
 /// disappearing would otherwise reflow the whole tree. It also gives the tree its position
 /// indicator without costing a column of width, which matters in the stacked layout.
 ///
-/// Character counts, not display widths: a neutralized notice is git's own prose and the position
-/// is ASCII digits, so the two agree for everything this actually renders.
+/// Display columns throughout, never character counts: a notice is untrusted text — `copied
+/// {repo}:{path}`, straight from [`crate::controller::Controller::copy_path`] — and a CJK path
+/// occupies twice the columns it has characters. Counted as characters, such a notice was handed
+/// the whole row and the position was clipped off the right-hand end, which is half the reason
+/// this row exists (spec §7.3). The padding arithmetic below is therefore in columns too, so the
+/// position lands flush against the last column whatever the notice is made of.
 pub fn status_bar_line(notice: Option<&str>, cursor: usize, total: usize, width: u16) -> String {
     let width = width as usize;
     if width == 0 {
         return String::new();
     }
     let position = format!("{}/{}", cursor + 1, total);
-    if position.chars().count() >= width {
+    let position_cols = display_width(&position);
+    if position_cols >= width {
         // No room for both: the position is the part that is always true.
-        return position.chars().take(width).collect();
+        return take_columns(&position, width, Keep::Head).0;
     }
     // One column of gap so a full-width notice cannot run into the position.
-    let left_room = width - position.chars().count() - 1;
-    let left: String = notice
-        .map(safe)
-        .unwrap_or_default()
-        .chars()
-        .take(left_room)
-        .collect();
-    let pad = width - position.chars().count() - left.chars().count();
+    let left_room = width - position_cols - 1;
+    let (left, left_cols) =
+        take_columns(&notice.map(safe).unwrap_or_default(), left_room, Keep::Head);
+    // From the columns the notice really took, not the ones it was offered: a double-width
+    // character straddling the boundary leaves a column that has to go into the padding.
+    let pad = width - position_cols - left_cols;
     format!("{left}{}{position}", " ".repeat(pad))
 }
 
@@ -1219,6 +1286,36 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_character_notice_still_leaves_room_for_the_position() {
+        // `Controller::copy_path` builds `copied {repo}:{path}` out of untrusted names, and this
+        // project's own README examples carry CJK. 20 characters, 28 display columns: measured as
+        // characters the notice was judged to fit a 30-column bar, so the padding arithmetic left
+        // it the whole row and the position — half the reason this row exists (spec §7.3) — was
+        // clipped away entirely.
+        let bar = status_bar_line(Some("copied 專案:文件/測試檔案.rs"), 0, 9, 30);
+        assert!(bar.ends_with("1/9"), "{bar:?}");
+        assert_eq!(
+            display_width(&bar),
+            30,
+            "the position stays flush to the last column: {bar:?}"
+        );
+    }
+
+    #[test]
+    fn a_tab_in_a_notice_does_not_shift_the_position_left() {
+        // `safe()` keeps `\t` (`neutralize_plain_text` does), and ratatui draws no column for it:
+        // its renderer drops any grapheme holding a control character rather than expanding it.
+        // Counting the tab as a column therefore drew the position two columns early.
+        let bar = status_bar_line(Some("copied a\tb\tc"), 0, 9, 20);
+        assert!(
+            !bar.contains('\t'),
+            "dropped here, exactly where the renderer would drop it: {bar:?}"
+        );
+        assert!(bar.ends_with("1/9"), "{bar:?}");
+        assert_eq!(display_width(&bar), 20, "{bar:?}");
+    }
+
+    #[test]
     fn the_status_bar_has_its_own_row_instead_of_eating_a_tree_row() {
         // draw_notice used to Clear the bottom line of the pane, silently costing a tree row.
         let mut controller = crate::controller::tests_support::loaded_controller();
@@ -1290,6 +1387,37 @@ mod tests {
         let row = file_row("some/file.rs");
         assert_eq!(diff_title(Some(&row), &[entry()], 1), "…");
         assert_eq!(diff_title(Some(&row), &[entry()], 0), "");
+    }
+
+    #[test]
+    fn a_wide_character_diff_title_is_cut_by_column_not_by_character() {
+        // 17 characters but 30 display columns. Measured as characters this title was judged to
+        // FIT a 20-column pane, so it came back whole and ratatui clipped the RIGHT instead —
+        // dropping both the file name and the `…` that says something was dropped, the exact
+        // opposite of what spec §8.1 asks for.
+        let row = file_row("專案/子目錄/測試/重要檔案.rs");
+        let title = diff_title(Some(&row), &[entry()], 20);
+        assert!(title.starts_with('…'), "{title:?}");
+        assert!(
+            title.ends_with("重要檔案.rs"),
+            "the file name is the part that matters: {title:?}"
+        );
+        assert_eq!(display_width(&title), 20, "{title:?}");
+    }
+
+    #[test]
+    fn a_cut_landing_inside_a_wide_character_gives_up_the_column_rather_than_splitting_it() {
+        // 16 columns of path into 9: one column goes to the `…`, and the character sitting on the
+        // boundary is two columns wide, so the tail stops one column short of the room available
+        // rather than being halved.
+        let row = file_row("測試/重要檔案.rs");
+        let title = diff_title(Some(&row), &[entry()], 9);
+        assert_eq!(title, "…檔案.rs");
+        assert_eq!(
+            display_width(&title),
+            8,
+            "one column short, never a split character"
+        );
     }
 
     #[test]
