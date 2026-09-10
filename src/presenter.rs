@@ -13,7 +13,7 @@ use crate::theme::{self, Role};
 use crate::tree::{Row, RowId};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use std::path::PathBuf;
@@ -254,29 +254,42 @@ pub fn draw(frame: &mut Frame, controller: &Controller, bindings: &Bindings) -> 
 
 /// Draw the tree, scrolled so the cursor stays visible, and report each row's screen line.
 fn draw_tree(frame: &mut Frame, controller: &Controller, area: Rect) -> Vec<(u16, usize)> {
-    let focused = controller.focus() == Focus::Tree;
-    let block = Block::default()
-        .borders(Borders::NONE)
-        .style(border_style(focused));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.height == 0 {
+    if area.height == 0 {
         return Vec::new();
     }
     let tree = controller.tree();
-    let repos = controller.repos();
-    let height = inner.height as usize;
-    let (lines, hits) = windowed_rows(tree.rows(), repos, tree.cursor(), height, inner.y, |id| {
+    let win = Window {
+        cursor: tree.cursor(),
+        height: area.height as usize,
+        base_y: area.y,
+        // The tree has no border to brighten, so the selection bar is its whole focus cue.
+        focused: controller.focus() == Focus::Tree,
+    };
+    let (lines, hits) = windowed_rows(tree.rows(), controller.repos(), win, |id| {
         tree.is_collapsed(id)
     });
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
     hits
+}
+
+/// Which slice of the row list to draw, where it lands on screen, and how the cursor row should
+/// look. Bundled rather than passed loose so the parameter count stays under clippy's limit.
+#[derive(Debug, Clone, Copy)]
+struct Window {
+    /// Index of the cursor within the row list.
+    cursor: usize,
+    /// How many rows fit.
+    height: usize,
+    /// The screen row the window's first drawn line lands on.
+    base_y: u16,
+    /// Whether the TREE has focus, which decides the cursor row's treatment.
+    focused: bool,
 }
 
 /// The pure heart of `draw_tree`: which rows are visible in a `height`-tall window starting at
 /// the cursor's neighborhood, formatted to text, alongside where each landed on screen.
 ///
-/// `base_y` is the first screen row of the window (`inner.y` in `draw_tree`; `0` in tests).
+/// `win.base_y` is the first screen row of the window (`inner.y` in `draw_tree`; `0` in tests).
 ///
 /// A row whose indices do not resolve against `repos` (which cannot happen through the public
 /// API today, since the tree and the presenter always read the same repo list, but nothing in
@@ -288,17 +301,15 @@ fn draw_tree(frame: &mut Frame, controller: &Controller, area: Rect) -> Vec<(u16
 fn windowed_rows(
     rows: &[Row],
     repos: &[RepoEntry],
-    cursor: usize,
-    height: usize,
-    base_y: u16,
+    win: Window,
     is_collapsed: impl Fn(&RowId) -> bool,
 ) -> (Vec<Line<'static>>, Vec<(u16, usize)>) {
     // Keep the cursor on screen with the simplest rule that never jumps: scroll only far
     // enough to include it.
-    let first = cursor.saturating_sub(height.saturating_sub(1));
+    let first = win.cursor.saturating_sub(win.height.saturating_sub(1));
     let mut lines = Vec::new();
     let mut hits = Vec::new();
-    for (offset, row) in rows.iter().skip(first).take(height).enumerate() {
+    for (offset, row) in rows.iter().skip(first).take(win.height).enumerate() {
         let Some(repo) = repos.get(row.repo_idx) else {
             continue;
         };
@@ -320,14 +331,14 @@ fn windowed_rows(
             }
         };
         let index = first + offset;
-        let base = if index == cursor {
-            theme::selection(true)
+        let base = if index == win.cursor {
+            theme::selection(win.focused)
         } else {
             Style::default()
         };
         // Derived from what has actually been pushed to `lines` so far, not from `offset` —
         // `offset` counts rows skipped by a `continue` above, `lines.len()` does not.
-        let y = base_y + lines.len() as u16;
+        let y = win.base_y + lines.len() as u16;
         hits.push((y, index));
         lines.push(to_line(segments, base));
     }
@@ -340,14 +351,13 @@ fn draw_diff(frame: &mut Frame, controller: &Controller, area: Rect, orientation
         return;
     }
     let focused = controller.focus() == Focus::Diff;
-    let block = match orientation {
-        Orientation::Stacked => Block::default()
-            .borders(Borders::TOP)
-            .style(border_style(focused)),
-        Orientation::SideBySide => Block::default()
-            .borders(Borders::LEFT)
-            .style(border_style(focused)),
+    let borders = match orientation {
+        Orientation::Stacked => Borders::TOP,
+        Orientation::SideBySide => Borders::LEFT,
     };
+    let block = Block::default()
+        .borders(borders)
+        .border_style(theme::pane_border(focused));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -390,14 +400,6 @@ fn draw_help(frame: &mut Frame, area: Rect, bindings: &Bindings) {
     );
 }
 
-fn border_style(focused: bool) -> Style {
-    if focused {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    }
-}
-
 /// Neutralize untrusted text and collapse it to one line — every row here has exactly one.
 fn safe(raw: &str) -> String {
     neutralize_plain_text(raw).replace(['\n', '\r'], " ")
@@ -410,6 +412,7 @@ mod tests {
     use crate::model::{FileEntry, RepoEntry, RepoKind, StatusGroup};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Modifier;
 
     fn entry() -> RepoEntry {
         RepoEntry {
@@ -770,7 +773,17 @@ mod tests {
         // `continue`s in the loop, which share the same reporting logic.
         let rows = vec![repo_row(0), repo_row(99), repo_row(1)];
         let repos = vec![named_repo("a"), named_repo("b")];
-        let (lines, hits) = windowed_rows(&rows, &repos, 0, 10, 5, |_| false);
+        let (lines, hits) = windowed_rows(
+            &rows,
+            &repos,
+            Window {
+                cursor: 0,
+                height: 10,
+                base_y: 5,
+                focused: true,
+            },
+            |_| false,
+        );
 
         // The invariant `Hits` exists for: every drawn line has exactly one hit, and the hits'
         // `y` values are exactly the screen rows `lines` actually occupies — contiguous from
@@ -785,6 +798,23 @@ mod tests {
     }
 
     // ---- smoke tests through a real backend -------------------------------------------------------
+
+    /// The style of the cell at `(x, y)` after one draw.
+    fn cell_style(
+        width: u16,
+        height: u16,
+        controller: &crate::controller::Controller,
+        x: u16,
+        y: u16,
+    ) -> Style {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+        terminal
+            .draw(|f| {
+                draw(f, controller, &default_bindings());
+            })
+            .expect("draw");
+        terminal.backend().buffer()[(x, y)].style()
+    }
 
     /// The visible characters of the rendered buffer, joined by newlines.
     fn screen(width: u16, height: u16, controller: &crate::controller::Controller) -> String {
@@ -845,5 +875,54 @@ mod tests {
         let controller = crate::controller::tests_support::empty_controller();
         let out = screen(80, 12, &controller);
         assert!(out.contains("No git repositories"), "{out}");
+    }
+
+    #[test]
+    fn the_tree_says_it_has_focus_even_though_it_has_no_border_to_brighten() {
+        // Before this, the tree's focus cue was BOLD on a Borders::NONE block, which the
+        // Paragraph drew straight over: pressing Tab changed nothing on screen.
+        let mut controller = crate::controller::tests_support::loaded_controller();
+        // The cursor starts on row 0 of the tree, which is screen row 1 (row 0 is the title).
+        let focused = cell_style(140, 12, &controller, 0, 1);
+        assert!(
+            focused.add_modifier.contains(Modifier::REVERSED),
+            "the tree has focus, so its cursor row is reversed: {focused:?}"
+        );
+
+        controller.handle(crate::intent::Intent::FocusToggle);
+        let unfocused = cell_style(140, 12, &controller, 0, 1);
+        assert!(
+            !unfocused.add_modifier.contains(Modifier::REVERSED),
+            "focus moved to the diff: {unfocused:?}"
+        );
+        assert!(
+            unfocused.add_modifier.contains(Modifier::UNDERLINED),
+            "the tree keeps a quieter selection bar: {unfocused:?}"
+        );
+    }
+
+    #[test]
+    fn the_divider_says_which_pane_has_focus() {
+        let mut controller = crate::controller::tests_support::loaded_controller();
+        // The diff block's LEFT border sits in the first column of the diff region.
+        let divider_x = (140u32 * u32::from(crate::layout::TREE_PCT) / 100) as u16;
+        let tree_has_focus = cell_style(140, 12, &controller, divider_x, 1);
+        controller.handle(crate::intent::Intent::FocusToggle);
+        let diff_has_focus = cell_style(140, 12, &controller, divider_x, 1);
+        assert_ne!(
+            tree_has_focus, diff_has_focus,
+            "the divider must reflect which side is active"
+        );
+    }
+
+    #[test]
+    fn a_rows_own_colours_survive_being_selected() {
+        // The selection is a modifier, not a colour, precisely so this holds.
+        let controller = crate::controller::tests_support::loaded_controller();
+        let branch_style = theme::style(Role::Branch).patch(theme::selection(true));
+        assert_eq!(branch_style.fg, theme::style(Role::Branch).fg);
+        assert!(branch_style.add_modifier.contains(Modifier::REVERSED));
+        // And the pane still draws.
+        let _ = screen(140, 12, &controller);
     }
 }
