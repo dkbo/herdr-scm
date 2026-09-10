@@ -1,6 +1,6 @@
 [package]
 name = "herdr-scm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "A read-only, multi-repo source-control overview panel that runs as a herdr TUI pane"

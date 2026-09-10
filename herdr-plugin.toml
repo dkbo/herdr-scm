@@ -10,7 +10,7 @@
 
 id = "herdr-scm"
 name = "herdr-scm"
-version = "0.1.0"
+version = "0.2.0"
 description = "A read-only, multi-repo source-control overview panel for the current herdr workspace."
 # 0.9.0 is where `herdr pane list --workspace <id>` and the `pane list` payload this plugin
 # parses were verified. It is also the version the plugin was developed against.
