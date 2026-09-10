@@ -199,20 +199,55 @@ pub fn help_lines(bindings: &Bindings) -> Vec<String> {
         .collect()
 }
 
+/// The bottom line: what just happened on the left, where the cursor is on the right.
+///
+/// A permanent row rather than one carved out only when a notice exists — a notice appearing and
+/// disappearing would otherwise reflow the whole tree. It also gives the tree its position
+/// indicator without costing a column of width, which matters in the stacked layout.
+///
+/// Character counts, not display widths: a neutralized notice is git's own prose and the position
+/// is ASCII digits, so the two agree for everything this actually renders.
+pub fn status_bar_line(notice: Option<&str>, cursor: usize, total: usize, width: u16) -> String {
+    let width = width as usize;
+    if width == 0 {
+        return String::new();
+    }
+    let position = format!("{}/{}", cursor + 1, total);
+    if position.chars().count() >= width {
+        // No room for both: the position is the part that is always true.
+        return position.chars().take(width).collect();
+    }
+    // One column of gap so a full-width notice cannot run into the position.
+    let left_room = width - position.chars().count() - 1;
+    let left: String = notice
+        .map(safe)
+        .unwrap_or_default()
+        .chars()
+        .take(left_room)
+        .collect();
+    let pad = width - position.chars().count() - left.chars().count();
+    format!("{left}{}{position}", " ".repeat(pad))
+}
+
 /// Draw one frame and report where everything landed.
 pub fn draw(frame: &mut Frame, controller: &mut Controller, bindings: &Bindings) -> Hits {
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
         return Hits::default();
     }
-    // One row of title, the rest for the body. On a one-row pane the title wins: it still
-    // says how many repos are dirty, which beats a single unreadable tree row.
+    // One row of title, one of status bar, the rest for the body. On a one-row pane the title
+    // wins: it still says how many repos are dirty, which beats a single unreadable tree row.
+    //
+    // The status bar costs a row, so it is only carved out when the pane can spare one —
+    // title + status + three rows of content. Below that a notice overlays the bottom line
+    // instead, as it always did.
     let title_area = Rect::new(area.x, area.y, area.width, 1);
+    let status_rows: u16 = if area.height >= 5 { 1 } else { 0 };
     let body = Rect::new(
         area.x,
         area.y + 1,
         area.width,
-        area.height.saturating_sub(1),
+        area.height.saturating_sub(1 + status_rows),
     );
     frame.render_widget(
         Paragraph::new(to_line(title(controller.title_counts()), Style::default())),
@@ -239,7 +274,23 @@ pub fn draw(frame: &mut Frame, controller: &mut Controller, bindings: &Bindings)
     let geo = geometry(body, controller.settings().split_threshold_cols);
     let hits = draw_tree(frame, controller, geo.tree);
     draw_diff(frame, controller, geo.diff, geo.orientation);
-    if let Some(notice) = controller.notice() {
+    if status_rows == 1 {
+        let bar = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+        let (cursor, total) = {
+            let tree = controller.tree();
+            (tree.cursor(), tree.rows().len())
+        };
+        frame.render_widget(
+            Paragraph::new(status_bar_line(
+                controller.notice(),
+                cursor,
+                total,
+                area.width,
+            ))
+            .style(theme::style(Role::Chrome)),
+            bar,
+        );
+    } else if let Some(notice) = controller.notice() {
         draw_notice(frame, area, notice);
     }
     if controller.help_open() {
@@ -423,7 +474,7 @@ fn draw_diff(frame: &mut Frame, controller: &Controller, area: Rect, orientation
     );
 }
 
-/// A one-line transient notice along the bottom.
+/// A one-line transient notice along the bottom, for panes too short to afford a status bar.
 fn draw_notice(frame: &mut Frame, area: Rect, notice: &str) {
     if area.height < 2 {
         return;
@@ -1062,5 +1113,65 @@ mod tests {
         assert!(branch_style.add_modifier.contains(Modifier::REVERSED));
         // And the pane still draws.
         let _ = screen(140, 12, &mut controller);
+    }
+
+    // ---- the status bar ----------------------------------------------------------------------
+
+    #[test]
+    fn the_status_bar_reports_the_cursor_position_on_the_right() {
+        let bar = status_bar_line(None, 0, 48, 20);
+        assert_eq!(bar.chars().count(), 20, "{bar:?}");
+        assert!(bar.ends_with("1/48"), "{bar:?}");
+        assert_eq!(bar.trim_start(), "1/48", "{bar:?}");
+    }
+
+    #[test]
+    fn a_notice_sits_on_the_left_without_pushing_the_position_off() {
+        let bar = status_bar_line(Some("copied"), 11, 48, 20);
+        assert!(bar.starts_with("copied"), "{bar:?}");
+        assert!(bar.ends_with("12/48"), "{bar:?}");
+        assert_eq!(bar.chars().count(), 20, "{bar:?}");
+    }
+
+    #[test]
+    fn a_long_notice_is_truncated_rather_than_evicting_the_position() {
+        let bar = status_bar_line(Some(&"x".repeat(200)), 0, 9, 20);
+        assert!(bar.ends_with("1/9"), "{bar:?}");
+        assert_eq!(bar.chars().count(), 20, "{bar:?}");
+    }
+
+    #[test]
+    fn a_notice_carrying_control_characters_is_neutralized_in_the_status_bar() {
+        // A notice can quote a file name or git's stderr, both untrusted.
+        let bar = status_bar_line(Some("a\x1b[2Jb\nc"), 0, 1, 20);
+        assert!(!bar.contains('\x1b'), "{bar:?}");
+        assert_eq!(bar.lines().count(), 1, "{bar:?}");
+    }
+
+    #[test]
+    fn a_bar_too_narrow_for_both_keeps_the_position() {
+        // The position is the part that is always true, so it is the part that survives.
+        assert_eq!(status_bar_line(Some("copied"), 0, 9, 3), "1/9");
+        assert_eq!(status_bar_line(None, 0, 9, 0), "");
+    }
+
+    #[test]
+    fn the_status_bar_has_its_own_row_instead_of_eating_a_tree_row() {
+        // draw_notice used to Clear the bottom line of the pane, silently costing a tree row.
+        let mut controller = crate::controller::tests_support::loaded_controller();
+        let out = screen(80, 12, &mut controller);
+        let last = out.lines().last().expect("a last line");
+        assert!(
+            last.contains("1/"),
+            "the bottom row is the status bar: {out}"
+        );
+        assert!(out.contains("teleagent"), "{out}");
+    }
+
+    #[test]
+    fn a_pane_with_no_room_for_a_status_bar_still_draws_the_tree() {
+        let mut controller = crate::controller::tests_support::loaded_controller();
+        let out = screen(80, 4, &mut controller);
+        assert!(out.contains("teleagent"), "{out}");
     }
 }
