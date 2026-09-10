@@ -93,7 +93,20 @@ impl Role {
 pub fn style(role: Role) -> Style {
     match role {
         // Identity: no foreground at all, so the terminal's own decides.
-        Role::RepoName | Role::DiffTitle => Style::default().add_modifier(Modifier::BOLD),
+        Role::RepoName => Style::default().add_modifier(Modifier::BOLD),
+        // Also identity — but explicitly `Color::Reset` rather than leaving `fg` unset, because
+        // this is the one identity role drawn inside a `Block` whose `border_style` can already
+        // have painted a colour (DarkGray, when unfocused) across the very cells the title
+        // occupies: `Borders::TOP` in the stacked diff layout spans the block's full width, title
+        // included. `Style::patch` only overrides a channel when the incoming style's field is
+        // `Some`, so patching an `fg: None` title style on top of an already-DarkGray-painted row
+        // leaves the border's DarkGray in place — the title would silently dim whenever the pane
+        // is unfocused, exactly the bug this role exists to avoid. `Color::Reset` IS the
+        // terminal's own default foreground, so this still satisfies spec §4.3's "default
+        // foreground + BOLD"; naming it is what lets it win the patch.
+        Role::DiffTitle => Style::default()
+            .fg(Color::Reset)
+            .add_modifier(Modifier::BOLD),
         Role::GroupTitle | Role::Path => Style::default(),
         // A magnitude, not a kind — colouring it yellow would steal "modified"'s meaning.
         Role::DirtyCount => Style::default().add_modifier(Modifier::BOLD),
@@ -268,5 +281,15 @@ mod tests {
     fn a_focused_pane_border_is_distinguishable_from_an_unfocused_one() {
         assert_ne!(pane_border(true), pane_border(false));
         assert_eq!(pane_border(false).fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn the_diff_title_pins_an_explicit_reset_foreground_so_a_border_cannot_dim_it() {
+        // An unfocused pane's border_style paints DarkGray across every cell the title sits on
+        // (Borders::TOP spans the block's full width in the stacked layout). Style::patch only
+        // overrides a channel when the incoming value is Some, so `fg: None` here would leave
+        // that DarkGray in place; only a named Color::Reset can win the patch and restore the
+        // terminal's own default foreground.
+        assert_eq!(style(Role::DiffTitle).fg, Some(Color::Reset));
     }
 }

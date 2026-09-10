@@ -1358,4 +1358,21 @@ mod tests {
             "the overlay still spans nearly the whole pane: {widest}"
         );
     }
+
+    #[test]
+    fn an_unfocused_stacked_diff_title_does_not_inherit_the_borders_dimmed_colour() {
+        // Borders::TOP paints its border_style's fg across the ENTIRE top row in the stacked
+        // layout — including every cell the title occupies — before the title is drawn. Style::
+        // patch only overrides a channel when the incoming style's field is Some, so an unnamed
+        // (`fg: None`) title style would leave the unfocused border's DarkGray in place: the
+        // selected file's name would silently render dimmed. The tree has focus by default, so
+        // the diff pane is unfocused here without any FocusToggle.
+        let mut controller = crate::controller::tests_support::loaded_controller();
+        controller.handle(crate::intent::Intent::NextChange);
+        // 60 columns is below the split threshold, so the pane stacks; the title lands on the
+        // diff block's top border row, at its leftmost column — found empirically by printing
+        // the rendered buffer for this exact size.
+        let title_cell = cell_style(60, 16, &mut controller, 0, 8);
+        assert_eq!(title_cell.fg, theme::style(Role::DiffTitle).fg);
+    }
 }
