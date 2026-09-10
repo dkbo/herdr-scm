@@ -17,25 +17,53 @@ state at once.
 Wide pane (≥ `split_threshold_cols`, default 120 columns) — tree and diff side by side:
 
 ```
-┌ SCM · herdr-p ── 6 repos · 3 dirty ─────────────────────────────────┐
-│ ▾ teleagent    master ↑6↓1 root │ e2e/specs/07-authz-boundary.spec.ts│
-│   ▾ Changes                  1  │ @@ -12,6 +12,9 @@                  │
-│     U 07-authz-boundary.spec.ts │  test('B3 拒絕跨租戶', async () => {│
-│ ▸ pencil       main    nested   │ +  await expect(page).toHaveURL(…) │
-└─────────────────────────────────┴────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│ SCM — 6 repos · 3 dirty                                              │
+│ ▾ teleagent  master  ↑6 ↓1  root  1 │ e2e/specs/07-authz.spec.ts     │
+│   ▾ Changes  1                      │ @@ -12,6 +12,9 @@              │
+│     M e2e/specs/07-authz.spec.ts    │  test('B3 rejects cross-tenant'│
+│ ▸ pencil  sub/pencil  main  nested  │ +  await expect(page).toHaveURL│
+│                                     │                                │
+│ copied teleagent:e2e/specs/07-au…                               3/5  │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 Narrow pane (below the threshold) — tree stacked above diff:
 
 ```
-┌ SCM · herdr-p ── 6 repos · 3 dirty ──────────┐
-│ ▾ teleagent      master ↑6 ↓1  root       1  │
-│   ▾ Changes                                  │
-│     U  e2e/specs/07-authz-boundary.spec.ts   │
-├─ 07-authz-boundary.spec.ts ──────────────────┤
+┌──────────────────────────────────────────────┐
+│ SCM — 6 repos · 3 dirty                      │
+│ ▾ teleagent  master  ↑6 ↓1  root  1          │
+│   ▾ Changes  1                               │
+│     M e2e/specs/07-authz.spec.ts             │
+│ ▸ pencil  sub/pencil  main  nested           │
+├─ e2e/specs/07-authz.spec.ts ─────────────────┤
 │ @@ -12,6 +12,9 @@                            │
+│  test('B3 rejects cross-tenant', async () => │
+│                                         3/5  │
 └──────────────────────────────────────────────┘
 ```
+
+The bottom row is a status bar: whatever the last action reported on the left, and the cursor's
+position in the tree on the right. The outer box above is only there to mark the pane's edges —
+the panel itself draws no outer border.
+
+### Colours
+
+The panel uses your terminal's own sixteen ANSI colours rather than a palette of its own, so it
+follows whatever theme you have set and stays legible on a light background or over a 16-colour
+SSH session. That is also the only way the tree can stay in step with the diff beside it, which
+`delta` colours according to your `delta` config and terminal theme — neither of which this
+plugin can see.
+
+What the colours mean: green, red and yellow are file-change semantics, matching `delta`'s own
+`+` and `-`; cyan and magenta are git refs and sync state; dark grey is structure and information
+that has gone to zero (`↑0 ↓0` recedes, because level with the upstream is nothing to act on);
+and repo names and file paths take no colour at all, so they render in your terminal's own
+foreground. A merge conflict (`U`) is bold red — the loudest thing on the screen.
+
+There is nothing to configure here, deliberately: change your terminal theme and both halves of
+the pane change with it.
 
 ## Install
 
