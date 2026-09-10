@@ -55,8 +55,9 @@ impl Role {
     ///
     /// A forgotten variant is caught by the compiler, not by this list: `style` has no `_` arm
     /// for the non-`Status` variants, so adding one without assigning it fails to compile. What
-    /// `ALL` is for is the palette-wide invariants — no `White`, no `Rgb` — which have to be
-    /// checked over every role rather than proven per arm.
+    /// `ALL` is for is the palette-wide invariant — every colour named anywhere in the palette is
+    /// one of the whitelisted ANSI-16 variants — which has to be checked over every role rather
+    /// than proven per arm.
     pub const ALL: &[Role] = &[
         Role::RepoName,
         Role::RelPath,
@@ -175,23 +176,38 @@ mod tests {
     use super::*;
     use ratatui::style::{Color, Modifier, Style};
 
-    #[test]
-    fn the_palette_never_uses_white_so_a_light_background_terminal_stays_readable() {
-        for &role in Role::ALL {
-            let s = style(role);
-            assert_ne!(s.fg, Some(Color::White), "{role:?}");
-            assert_ne!(s.bg, Some(Color::White), "{role:?}");
-        }
-    }
+    /// Every colour the palette is allowed to name (the plan's Global Constraints).
+    const ALLOWED: &[Color] = &[
+        // The terminal's own default foreground, named rather than left unset. `Role::DiffTitle`
+        // needs it that way so a `Block`'s border_style cannot dim the title — see the doc
+        // comment there — which is why the whitelist has to admit it.
+        Color::Reset,
+        Color::Green,
+        Color::Red,
+        Color::Yellow,
+        Color::Cyan,
+        Color::Magenta,
+        Color::DarkGray,
+    ];
 
     #[test]
-    fn the_palette_is_ansi_only_so_it_follows_the_terminal_theme() {
+    fn the_palette_only_names_ansi_16_variants_that_follow_the_terminal_theme() {
+        // One whitelist in place of two bans, which between them enforced two of the three rules
+        // the plan states. What each is here for:
+        //
+        // * No `Color::White` — and equally no `Color::Black`, which the bans let through: a
+        //   hard-coded end of the greyscale is white-on-white on a light-background terminal
+        //   (§4.2) and black-on-black on a dark one.
+        // * No `Color::Rgb` and no `Color::Indexed`: neither follows the user's terminal theme,
+        //   so the tree would drift out of step with the `delta` output beside it (§4.1).
+        // * Only the named ANSI-16 semantic variants — the rule two negative tests could not
+        //   express at all. `Gray`, `LightRed` and `LightYellow` satisfied both of them.
         for &role in Role::ALL {
             let s = style(role);
             for color in [s.fg, s.bg].into_iter().flatten() {
                 assert!(
-                    !matches!(color, Color::Rgb(..) | Color::Indexed(_)),
-                    "{role:?} uses {color:?}, which does not follow the terminal theme"
+                    ALLOWED.contains(&color),
+                    "{role:?} uses {color:?}, which is not in the palette"
                 );
             }
         }

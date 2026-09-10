@@ -391,6 +391,11 @@ pub fn draw(frame: &mut Frame, controller: &mut Controller, bindings: &Bindings)
     draw_diff(frame, controller, geo.diff, geo.orientation);
     if status_rows == 1 {
         let bar = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+        // `total >= 1` is guaranteed here, which is why `status_bar_line` has no `total == 0`
+        // case and spec §7.3 says it needs none. The argument lives in two other modules, so it
+        // is worth writing down: `controller.is_empty()` is `repos.is_empty()` and returned above
+        // via the empty-state branch, and `tree::flatten` pushes a repo row for every repo
+        // unconditionally — so a non-empty `repos` cannot produce an empty row list.
         let (cursor, total) = {
             let tree = controller.tree();
             (tree.cursor(), tree.rows().len())
@@ -506,6 +511,8 @@ struct Window {
     /// The screen row the window's first drawn line lands on.
     base_y: u16,
     /// Whether the TREE has focus, which decides the cursor row's treatment.
+    ///
+    /// The tree has no border to brighten, so the selection bar is its whole focus cue.
     focused: bool,
 }
 
@@ -629,7 +636,11 @@ fn draw_help(frame: &mut Frame, area: Rect, bindings: &Bindings) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(theme::style(Role::Chrome))
-                .title("Keys"),
+                // Styled explicitly, not left to inherit. A plain `&str` title has `fg: None`,
+                // so `Style::patch` leaves whatever the border already painted across the top
+                // row in place — the same bleed the diff title had to be fixed for. It happens
+                // to land on Chrome here, which is what spec §8.2 asks for, but only by luck.
+                .title(Line::styled("Keys", theme::style(Role::Chrome))),
         ),
         overlay,
     );
@@ -1118,6 +1129,36 @@ mod tests {
 
     // ---- smoke tests through a real backend -------------------------------------------------------
 
+    /// One `width`×`height` frame, as the backend actually painted it.
+    fn rendered(
+        width: u16,
+        height: u16,
+        controller: &mut crate::controller::Controller,
+    ) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+        terminal
+            .draw(|f| {
+                draw(f, controller, &default_bindings());
+            })
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    /// The visible characters of one row of a rendered buffer.
+    fn row_text(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    /// The visible characters of a rendered buffer, joined by newlines.
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        (0..buffer.area.height)
+            .map(|y| row_text(buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// The style of the cell at `(x, y)` after one draw.
     fn cell_style(
         width: u16,
@@ -1126,32 +1167,12 @@ mod tests {
         x: u16,
         y: u16,
     ) -> Style {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
-        terminal
-            .draw(|f| {
-                draw(f, controller, &default_bindings());
-            })
-            .expect("draw");
-        terminal.backend().buffer()[(x, y)].style()
+        rendered(width, height, controller)[(x, y)].style()
     }
 
     /// The visible characters of the rendered buffer, joined by newlines.
     fn screen(width: u16, height: u16, controller: &mut crate::controller::Controller) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
-        terminal
-            .draw(|f| {
-                draw(f, controller, &default_bindings());
-            })
-            .expect("draw");
-        let buffer = terminal.backend().buffer().clone();
-        (0..height)
-            .map(|y| {
-                (0..width)
-                    .map(|x| buffer[(x, y)].symbol().to_string())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        buffer_text(&rendered(width, height, controller))
     }
 
     #[test]
@@ -1333,6 +1354,15 @@ mod tests {
         let mut controller = crate::controller::tests_support::loaded_controller();
         let out = screen(80, 4, &mut controller);
         assert!(out.contains("teleagent"), "{out}");
+        // And the bar really was skipped rather than the floor being off by one: a floor of 4
+        // draws a status bar here and takes half the tree's remaining rows to pay for it, while
+        // row 0 still reads "teleagent" — so the assertion above alone cannot tell the two
+        // apart. The absence of a position on the last line is what distinguishes them.
+        let last = out.lines().last().expect("a last line");
+        assert!(
+            !last.contains("1/"),
+            "4 rows cannot afford a status bar (title + status + 3 content = 5): {out}"
+        );
     }
 
     // ---- the diff title ------------------------------------------------------------------------
@@ -1497,10 +1527,35 @@ mod tests {
         // the diff pane is unfocused here without any FocusToggle.
         let mut controller = crate::controller::tests_support::loaded_controller();
         controller.handle(crate::intent::Intent::NextChange);
-        // 60 columns is below the split threshold, so the pane stacks; the title lands on the
-        // diff block's top border row, at its leftmost column — found empirically by printing
-        // the rendered buffer for this exact size.
-        let title_cell = cell_style(60, 16, &mut controller, 0, 8);
-        assert_eq!(title_cell.fg, theme::style(Role::DiffTitle).fg);
+        // 60 columns is below the split threshold, so the pane stacks and the title lands on the
+        // diff block's top border row. Located by CONTENT rather than by fixed coordinates, and
+        // asserted on symbols as well as styles, because a style assertion alone cannot fail: a
+        // blank `Cell`'s fg is `Color::Reset` and `Role::DiffTitle`'s fg is `Some(Color::Reset)`,
+        // so any untouched cell satisfies it. Searching for the text also retires the hardcoded
+        // (0, 8), which the split ratio, the status-bar floor or TREE_PCT could all move.
+        let buffer = rendered(60, 16, &mut controller);
+        let title = "e2e/specs/07-authz.spec.ts";
+        let y = (0..buffer.area.height)
+            .find(|&y| row_text(&buffer, y).starts_with(title))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no row begins with the diff title:\n{}",
+                    buffer_text(&buffer)
+                )
+            });
+        for (x, expected) in title.chars().enumerate() {
+            let cell = &buffer[(x as u16, y)];
+            assert_eq!(cell.symbol(), expected.to_string(), "({x}, {y})");
+            assert_eq!(
+                cell.style().fg,
+                theme::style(Role::DiffTitle).fg,
+                "({x}, {y}) of the title row"
+            );
+        }
+        // And this really is the row the bug was about: the cells past the title carry the
+        // unfocused border's own dimmed colour — the colour the title must not inherit.
+        let border = &buffer[(title.chars().count() as u16, y)];
+        assert_eq!(border.symbol(), "─", "the title sits on a border row");
+        assert_eq!(border.style().fg, theme::pane_border(false).fg);
     }
 }
