@@ -24,7 +24,7 @@ Wide pane (≥ `split_threshold_cols`, default 120 columns) — tree and diff si
 │     M e2e/specs/07-authz.spec.ts    │  test('B3 rejects cross-tenant'│
 │ ▸ pencil  sub/pencil  main  nested  │ +  await expect(page).toHaveURL│
 │                                     │                                │
-│ copied teleagent:e2e/specs/07-au…                               3/5  │
+│ copied teleagent:e2e/specs/07-authz.spec.ts                       3/8│
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -37,16 +37,18 @@ Narrow pane (below the threshold) — tree stacked above diff:
 │   ▾ Changes  1                               │
 │     M e2e/specs/07-authz.spec.ts             │
 │ ▸ pencil  sub/pencil  main  nested           │
-├─ e2e/specs/07-authz.spec.ts ─────────────────┤
+│ e2e/specs/07-authz.spec.ts───────────────────│
 │ @@ -12,6 +12,9 @@                            │
 │  test('B3 rejects cross-tenant', async () => │
-│                                         3/5  │
+│                                           3/8│
 └──────────────────────────────────────────────┘
 ```
 
 The bottom row is a status bar: whatever the last action reported on the left, and the cursor's
-position in the tree on the right. The outer box above is only there to mark the pane's edges —
-the panel itself draws no outer border.
+position in the tree on the right, flush to the last column. A notice too long for the row is
+simply cut short: the position is the half that is always true, so it is the half that keeps its
+columns. The outer box above is only there to mark the pane's edges — the panel itself draws no
+outer border.
 
 ### Colours
 
@@ -56,8 +58,8 @@ SSH session. That is also the only way the tree can stay in step with the diff b
 `delta` colours according to your `delta` config and terminal theme — neither of which this
 plugin can see.
 
-What the colours mean: green, red and yellow are file-change semantics, matching `delta`'s own
-`+` and `-`; cyan and magenta are git refs and sync state; dark grey is structure and information
+What the colours mean: green and red match `delta`'s own `+` and `-`, and yellow marks a
+modification; cyan and magenta are git refs and sync state; dark grey is structure and information
 that has gone to zero (`↑0 ↓0` recedes, because level with the upstream is nothing to act on);
 and repo names and file paths take no colour at all, so they render in your terminal's own
 foreground. A merge conflict (`U`) is bold red — the loudest thing on the screen.
