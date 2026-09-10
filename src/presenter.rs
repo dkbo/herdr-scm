@@ -200,7 +200,7 @@ pub fn help_lines(bindings: &Bindings) -> Vec<String> {
 }
 
 /// Draw one frame and report where everything landed.
-pub fn draw(frame: &mut Frame, controller: &Controller, bindings: &Bindings) -> Hits {
+pub fn draw(frame: &mut Frame, controller: &mut Controller, bindings: &Bindings) -> Hits {
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
         return Hits::default();
@@ -252,18 +252,31 @@ pub fn draw(frame: &mut Frame, controller: &Controller, bindings: &Bindings) -> 
     }
 }
 
-/// Draw the tree, scrolled so the cursor stays visible, and report each row's screen line.
-fn draw_tree(frame: &mut Frame, controller: &Controller, area: Rect) -> Vec<(u16, usize)> {
+/// Draw the tree, scrolled so the cursor keeps its context, and report each row's screen line.
+fn draw_tree(frame: &mut Frame, controller: &mut Controller, area: Rect) -> Vec<(u16, usize)> {
     if area.height == 0 {
         return Vec::new();
     }
+    let height = area.height as usize;
+    let first = {
+        let tree = controller.tree();
+        window_start(
+            controller.tree_scroll(),
+            tree.rows().len(),
+            tree.cursor(),
+            height,
+            SCROLLOFF,
+        )
+    };
+    controller.set_tree_scroll(first);
+    let focused = controller.focus() == Focus::Tree;
     let tree = controller.tree();
     let win = Window {
+        first,
         cursor: tree.cursor(),
-        height: area.height as usize,
+        height,
         base_y: area.y,
-        // The tree has no border to brighten, so the selection bar is its whole focus cue.
-        focused: controller.focus() == Focus::Tree,
+        focused,
     };
     let (lines, hits) = windowed_rows(tree.rows(), controller.repos(), win, |id| {
         tree.is_collapsed(id)
@@ -272,10 +285,54 @@ fn draw_tree(frame: &mut Frame, controller: &Controller, area: Rect) -> Vec<(u16
     hits
 }
 
+/// How many rows of context to keep above and below the cursor.
+///
+/// Not configurable: a panel this size has one right answer, and spec §3 keeps the config file
+/// out of this change entirely.
+const SCROLLOFF: usize = 3;
+
+/// Where a `height`-tall window should start, given where it started on the previous frame.
+///
+/// vim's scrolloff rule: the window holds still while the cursor stays at least `scrolloff` rows
+/// from either edge, and otherwise moves the minimum needed to restore that margin. The
+/// alternative — deriving the start from the cursor alone — is stateless but makes the whole pane
+/// move on every keypress.
+///
+/// Pure by construction: the caller owns the `prev` cell ([`Controller::tree_scroll`]), so this
+/// stays a table-testable function rather than becoming a stateful widget.
+///
+/// The final clamp is load-bearing rather than defensive. The panel re-polls every few seconds
+/// and `total` shrinks under the user — a repo goes clean, a group collapses — so a remembered
+/// `prev` is routinely out of range by the next frame.
+pub fn window_start(
+    prev: usize,
+    total: usize,
+    cursor: usize,
+    height: usize,
+    scrolloff: usize,
+) -> usize {
+    if height == 0 || total <= height {
+        return 0;
+    }
+    let max_first = total - height;
+    // Capped so the top and bottom margins can both hold in a short window; without this a
+    // scrolloff wider than the window would fight itself.
+    let off = scrolloff.min((height - 1) / 2);
+    let mut first = prev.min(max_first);
+    if cursor < first + off {
+        first = cursor.saturating_sub(off);
+    } else if cursor + off + 1 > first + height {
+        first = (cursor + off + 1).saturating_sub(height);
+    }
+    first.min(max_first)
+}
+
 /// Which slice of the row list to draw, where it lands on screen, and how the cursor row should
 /// look. Bundled rather than passed loose so the parameter count stays under clippy's limit.
 #[derive(Debug, Clone, Copy)]
 struct Window {
+    /// Index of the first row to draw.
+    first: usize,
     /// Index of the cursor within the row list.
     cursor: usize,
     /// How many rows fit.
@@ -304,12 +361,9 @@ fn windowed_rows(
     win: Window,
     is_collapsed: impl Fn(&RowId) -> bool,
 ) -> (Vec<Line<'static>>, Vec<(u16, usize)>) {
-    // Keep the cursor on screen with the simplest rule that never jumps: scroll only far
-    // enough to include it.
-    let first = win.cursor.saturating_sub(win.height.saturating_sub(1));
     let mut lines = Vec::new();
     let mut hits = Vec::new();
-    for (offset, row) in rows.iter().skip(first).take(win.height).enumerate() {
+    for (offset, row) in rows.iter().skip(win.first).take(win.height).enumerate() {
         let Some(repo) = repos.get(row.repo_idx) else {
             continue;
         };
@@ -330,7 +384,7 @@ fn windowed_rows(
                 }
             }
         };
-        let index = first + offset;
+        let index = win.first + offset;
         let base = if index == win.cursor {
             theme::selection(win.focused)
         } else {
@@ -743,6 +797,89 @@ mod tests {
         assert!(all.contains('j') && all.contains(']'), "{all}");
     }
 
+    // ---- window_start: where the tree's viewport begins ---------------------------------------
+
+    #[test]
+    fn a_window_that_fits_every_row_starts_at_the_top() {
+        assert_eq!(window_start(0, 5, 4, 10, 3), 0);
+        assert_eq!(
+            window_start(7, 5, 4, 10, 3),
+            0,
+            "a stale prev is clamped, not trusted"
+        );
+        assert_eq!(
+            window_start(0, 0, 0, 10, 3),
+            0,
+            "an empty list has nowhere to scroll"
+        );
+    }
+
+    #[test]
+    fn the_window_holds_still_while_the_cursor_stays_inside_the_margins() {
+        // total 100, height 10, scrolloff 3: rows 3..=6 of a window at 0 need no scroll.
+        for cursor in 3..=6 {
+            assert_eq!(window_start(0, 100, cursor, 10, 3), 0, "cursor {cursor}");
+        }
+    }
+
+    #[test]
+    fn the_window_scrolls_just_far_enough_to_keep_the_bottom_margin() {
+        // The bug this replaces pinned the cursor to the last row, so nothing was ever visible
+        // below it.
+        assert_eq!(window_start(0, 100, 7, 10, 3), 1);
+        assert_eq!(window_start(0, 100, 8, 10, 3), 2);
+    }
+
+    #[test]
+    fn the_window_scrolls_back_to_keep_the_top_margin() {
+        assert_eq!(window_start(90, 100, 92, 10, 3), 89);
+    }
+
+    #[test]
+    fn the_cursor_still_reaches_the_last_row_at_the_end_of_the_list() {
+        // No phantom rows below the end: the window stops at total - height.
+        assert_eq!(window_start(0, 100, 99, 10, 3), 90);
+    }
+
+    #[test]
+    fn a_remembered_start_past_the_end_is_clamped_rather_than_showing_a_blank_pane() {
+        // Load-bearing, not defensive: the panel re-polls every few seconds and `total` shrinks
+        // under the user when a repo goes clean or a group collapses.
+        assert_eq!(window_start(95, 20, 19, 10, 3), 10);
+    }
+
+    #[test]
+    fn a_one_row_window_still_tracks_the_cursor() {
+        assert_eq!(window_start(0, 100, 5, 1, 3), 5);
+    }
+
+    #[test]
+    fn a_scrolloff_taller_than_the_window_degrades_instead_of_pinning_the_cursor() {
+        // off is capped at (height - 1) / 2 so the top and bottom margins can both hold.
+        assert_eq!(window_start(0, 100, 0, 3, 99), 0);
+        assert_eq!(window_start(0, 100, 2, 3, 99), 1);
+    }
+
+    #[test]
+    fn a_zero_height_window_has_nowhere_to_start() {
+        assert_eq!(window_start(4, 100, 50, 0, 3), 0);
+    }
+
+    #[test]
+    fn the_cursor_is_no_longer_pinned_to_the_bottom_row_of_the_tree() {
+        // A window at the end of a long list: with the old rule the cursor sat on the last
+        // visible row and nothing below it was ever drawn.
+        let total = 100;
+        let height = 10;
+        let cursor = 50;
+        let first = window_start(0, total, cursor, height, SCROLLOFF);
+        assert!(
+            cursor < first + height - 1,
+            "rows below the cursor must be visible: first {first}, cursor {cursor}"
+        );
+        assert!(cursor >= first, "the cursor must be inside the window");
+    }
+
     // ---- windowed_rows: the pure row-selection core of draw_tree ---------------------------------
 
     /// A minimal one-repo entry, distinguishable only by its path, for `windowed_rows` tests.
@@ -777,6 +914,7 @@ mod tests {
             &rows,
             &repos,
             Window {
+                first: 0,
                 cursor: 0,
                 height: 10,
                 base_y: 5,
@@ -803,7 +941,7 @@ mod tests {
     fn cell_style(
         width: u16,
         height: u16,
-        controller: &crate::controller::Controller,
+        controller: &mut crate::controller::Controller,
         x: u16,
         y: u16,
     ) -> Style {
@@ -817,7 +955,7 @@ mod tests {
     }
 
     /// The visible characters of the rendered buffer, joined by newlines.
-    fn screen(width: u16, height: u16, controller: &crate::controller::Controller) -> String {
+    fn screen(width: u16, height: u16, controller: &mut crate::controller::Controller) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
         terminal
             .draw(|f| {
@@ -837,8 +975,8 @@ mod tests {
 
     #[test]
     fn a_wide_pane_draws_the_tree_and_the_diff_side_by_side() {
-        let controller = crate::controller::tests_support::loaded_controller();
-        let out = screen(140, 12, &controller);
+        let mut controller = crate::controller::tests_support::loaded_controller();
+        let out = screen(140, 12, &mut controller);
         assert!(out.contains("teleagent"), "{out}");
         // A side-by-side layout draws a vertical divider between tree and diff; a stacked one
         // does not. This distinguishes the two orientations without depending on exact column
@@ -852,8 +990,8 @@ mod tests {
 
     #[test]
     fn a_narrow_pane_stacks_without_panicking() {
-        let controller = crate::controller::tests_support::loaded_controller();
-        let out = screen(60, 12, &controller);
+        let mut controller = crate::controller::tests_support::loaded_controller();
+        let out = screen(60, 12, &mut controller);
         assert!(out.contains("teleagent"), "{out}");
         assert!(
             out.contains('\u{2500}'),
@@ -864,16 +1002,16 @@ mod tests {
     #[test]
     fn a_tiny_pane_draws_without_panicking() {
         // A herdr split can be dragged arbitrarily small; every size must be survivable.
-        let controller = crate::controller::tests_support::loaded_controller();
+        let mut controller = crate::controller::tests_support::loaded_controller();
         for (w, h) in [(1u16, 1u16), (2, 1), (1, 2), (10, 3), (0, 0)] {
-            let _ = screen(w.max(1), h.max(1), &controller);
+            let _ = screen(w.max(1), h.max(1), &mut controller);
         }
     }
 
     #[test]
     fn an_empty_panel_draws_the_empty_state_rather_than_a_blank_pane() {
-        let controller = crate::controller::tests_support::empty_controller();
-        let out = screen(80, 12, &controller);
+        let mut controller = crate::controller::tests_support::empty_controller();
+        let out = screen(80, 12, &mut controller);
         assert!(out.contains("No git repositories"), "{out}");
     }
 
@@ -883,14 +1021,14 @@ mod tests {
         // Paragraph drew straight over: pressing Tab changed nothing on screen.
         let mut controller = crate::controller::tests_support::loaded_controller();
         // The cursor starts on row 0 of the tree, which is screen row 1 (row 0 is the title).
-        let focused = cell_style(140, 12, &controller, 0, 1);
+        let focused = cell_style(140, 12, &mut controller, 0, 1);
         assert!(
             focused.add_modifier.contains(Modifier::REVERSED),
             "the tree has focus, so its cursor row is reversed: {focused:?}"
         );
 
         controller.handle(crate::intent::Intent::FocusToggle);
-        let unfocused = cell_style(140, 12, &controller, 0, 1);
+        let unfocused = cell_style(140, 12, &mut controller, 0, 1);
         assert!(
             !unfocused.add_modifier.contains(Modifier::REVERSED),
             "focus moved to the diff: {unfocused:?}"
@@ -906,9 +1044,9 @@ mod tests {
         let mut controller = crate::controller::tests_support::loaded_controller();
         // The diff block's LEFT border sits in the first column of the diff region.
         let divider_x = (140u32 * u32::from(crate::layout::TREE_PCT) / 100) as u16;
-        let tree_has_focus = cell_style(140, 12, &controller, divider_x, 1);
+        let tree_has_focus = cell_style(140, 12, &mut controller, divider_x, 1);
         controller.handle(crate::intent::Intent::FocusToggle);
-        let diff_has_focus = cell_style(140, 12, &controller, divider_x, 1);
+        let diff_has_focus = cell_style(140, 12, &mut controller, divider_x, 1);
         assert_ne!(
             tree_has_focus, diff_has_focus,
             "the divider must reflect which side is active"
@@ -918,11 +1056,11 @@ mod tests {
     #[test]
     fn a_rows_own_colours_survive_being_selected() {
         // The selection is a modifier, not a colour, precisely so this holds.
-        let controller = crate::controller::tests_support::loaded_controller();
+        let mut controller = crate::controller::tests_support::loaded_controller();
         let branch_style = theme::style(Role::Branch).patch(theme::selection(true));
         assert_eq!(branch_style.fg, theme::style(Role::Branch).fg);
         assert!(branch_style.add_modifier.contains(Modifier::REVERSED));
         // And the pane still draws.
-        let _ = screen(140, 12, &controller);
+        let _ = screen(140, 12, &mut controller);
     }
 }

@@ -63,6 +63,9 @@ pub struct Controller {
     diff_target: Option<(PathBuf, GroupKind, String)>,
     diff_text: Text<'static>,
     diff_scroll: u16,
+    /// Where the tree's window started on the previous frame — see `presenter::window_start`.
+    /// A view-only cache: it is clamped on every frame rather than invalidated on every poll.
+    tree_scroll: usize,
     notice: Option<String>,
     help_open: bool,
     scan_roots: Vec<PathBuf>,
@@ -81,6 +84,7 @@ impl Controller {
             diff_target: None,
             diff_text: Text::raw(""),
             diff_scroll: 0,
+            tree_scroll: 0,
             notice: None,
             help_open: false,
             scan_roots: Vec::new(),
@@ -103,6 +107,12 @@ impl Controller {
     }
     pub fn diff_scroll(&self) -> u16 {
         self.diff_scroll
+    }
+    pub fn tree_scroll(&self) -> usize {
+        self.tree_scroll
+    }
+    pub fn set_tree_scroll(&mut self, first: usize) {
+        self.tree_scroll = first;
     }
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
