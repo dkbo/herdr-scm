@@ -183,6 +183,42 @@ pub fn empty_state_lines(scan_roots: &[PathBuf]) -> Vec<String> {
     lines
 }
 
+/// The diff region's title: which file (or repo) the patch below belongs to.
+///
+/// Truncated from the LEFT when it does not fit, because the file name matters more than the
+/// directories leading to it.
+pub fn diff_title(selected: Option<&Row>, repos: &[RepoEntry], width: u16) -> String {
+    let text = match selected {
+        Some(row) => match &row.id {
+            RowId::File { path, .. } => safe(path),
+            // A repo or group row has no diff of its own; naming the repo is more use than
+            // saying nothing.
+            _ => repos
+                .get(row.repo_idx)
+                .map(|repo| safe(&repo.display_name))
+                .unwrap_or_default(),
+        },
+        None => "no file selected".to_string(),
+    };
+    truncate_left(&text, width as usize)
+}
+
+/// Keep the last `width` characters, marking the cut with a leading `…`.
+fn truncate_left(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count <= width {
+        return text.to_string();
+    }
+    match width {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => {
+            let tail: String = text.chars().skip(count - (width - 1)).collect();
+            format!("…{tail}")
+        }
+    }
+}
+
 /// The help overlay: every action with its effective keys.
 pub fn help_lines(bindings: &Bindings) -> Vec<String> {
     REGISTRY
@@ -197,6 +233,18 @@ pub fn help_lines(bindings: &Bindings) -> Vec<String> {
             format!("{keys:<12}  {}", row.description)
         })
         .collect()
+}
+
+/// The help overlay's width: as wide as its widest line, never wider than the pane can hold.
+///
+/// `+ 4` covers the two borders and a column of padding each side. Content-driven because a key
+/// list is around sixty columns, and stretching it across a 160-column pane just puts the keys
+/// and their descriptions too far apart to read together.
+pub fn help_width(lines: &[String], available: u16) -> u16 {
+    let content = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    ((content + 4) as u16)
+        .min(available.saturating_sub(2))
+        .max(1)
 }
 
 /// The bottom line: what just happened on the left, where the cursor is on the right.
@@ -450,19 +498,29 @@ fn windowed_rows(
     (lines, hits)
 }
 
-/// Draw the diff region, with a title in the stacked layout where it doubles as the divider.
+/// Draw the diff region, titled with the file it belongs to.
 fn draw_diff(frame: &mut Frame, controller: &Controller, area: Rect, orientation: Orientation) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     let focused = controller.focus() == Focus::Diff;
-    let borders = match orientation {
-        Orientation::Stacked => Borders::TOP,
-        Orientation::SideBySide => Borders::LEFT,
+    // In the stacked layout the border doubles as the divider and the title sits inside it; in
+    // the side-by-side one the title is simply the column's first row, as the README draws it.
+    let (borders, border_cols) = match orientation {
+        Orientation::Stacked => (Borders::TOP, 0),
+        Orientation::SideBySide => (Borders::LEFT, 1),
     };
+    let title = diff_title(
+        controller.tree().selected(),
+        controller.repos(),
+        area.width.saturating_sub(border_cols),
+    );
     let block = Block::default()
         .borders(borders)
-        .border_style(theme::pane_border(focused));
+        .border_style(theme::pane_border(focused))
+        // The title's style must not inherit the border's, or an unfocused pane would grey out
+        // its own file name — hence `border_style` above rather than `style`.
+        .title(Line::styled(title, theme::style(Role::DiffTitle)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -487,7 +545,7 @@ fn draw_notice(frame: &mut Frame, area: Rect, notice: &str) {
 /// The help overlay, centered.
 fn draw_help(frame: &mut Frame, area: Rect, bindings: &Bindings) {
     let lines = help_lines(bindings);
-    let width = area.width.saturating_sub(4).max(1);
+    let width = help_width(&lines, area.width);
     let height = ((lines.len() + 2) as u16).min(area.height);
     let overlay = Rect::new(
         area.x + (area.width.saturating_sub(width)) / 2,
@@ -500,7 +558,12 @@ fn draw_help(frame: &mut Frame, area: Rect, bindings: &Bindings) {
         Paragraph::new(Text::from(
             lines.into_iter().map(Line::from).collect::<Vec<_>>(),
         ))
-        .block(Block::default().borders(Borders::ALL).title("Keys")),
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme::style(Role::Chrome))
+                .title("Keys"),
+        ),
         overlay,
     );
 }
@@ -1173,5 +1236,126 @@ mod tests {
         let mut controller = crate::controller::tests_support::loaded_controller();
         let out = screen(80, 4, &mut controller);
         assert!(out.contains("teleagent"), "{out}");
+    }
+
+    // ---- the diff title ------------------------------------------------------------------------
+
+    fn file_row(path: &str) -> Row {
+        Row {
+            id: RowId::File {
+                repo: PathBuf::from("/w/teleagent"),
+                group: crate::model::GroupKind::Changes,
+                path: path.to_string(),
+            },
+            depth: 2,
+            repo_idx: 0,
+            group_idx: Some(0),
+            file_idx: Some(0),
+        }
+    }
+
+    #[test]
+    fn the_diff_title_names_the_selected_file() {
+        let row = file_row("e2e/specs/07-authz.spec.ts");
+        assert_eq!(
+            diff_title(Some(&row), &[entry()], 80),
+            "e2e/specs/07-authz.spec.ts"
+        );
+    }
+
+    #[test]
+    fn the_diff_title_falls_back_to_the_repo_when_a_repo_row_is_selected() {
+        assert_eq!(
+            diff_title(Some(&repo_row(0)), &[named_repo("teleagent")], 80),
+            "teleagent"
+        );
+    }
+
+    #[test]
+    fn the_diff_title_says_so_when_nothing_is_selected() {
+        assert_eq!(diff_title(None, &[], 80), "no file selected");
+    }
+
+    #[test]
+    fn a_too_long_diff_title_keeps_the_file_name_and_marks_the_cut() {
+        // Truncated from the LEFT: the file name matters more than the directories above it.
+        let row = file_row("a/very/deep/path/to/the/file.rs");
+        let title = diff_title(Some(&row), &[entry()], 12);
+        assert_eq!(title.chars().count(), 12, "{title:?}");
+        assert_eq!(title, "…the/file.rs");
+    }
+
+    #[test]
+    fn a_diff_title_with_no_room_at_all_does_not_panic() {
+        let row = file_row("some/file.rs");
+        assert_eq!(diff_title(Some(&row), &[entry()], 1), "…");
+        assert_eq!(diff_title(Some(&row), &[entry()], 0), "");
+    }
+
+    #[test]
+    fn a_diff_title_carrying_control_characters_is_neutralized() {
+        let row = file_row("a\x1b[2Jb");
+        let title = diff_title(Some(&row), &[entry()], 80);
+        assert!(!title.contains('\x1b'), "{title:?}");
+    }
+
+    #[test]
+    fn a_row_whose_repo_no_longer_resolves_gets_an_empty_title_rather_than_a_panic() {
+        assert_eq!(diff_title(Some(&repo_row(99)), &[], 80), "");
+    }
+
+    #[test]
+    fn both_layouts_name_the_selected_file_above_its_diff() {
+        // draw_diff's doc comment claimed a title in the stacked layout, but neither branch set
+        // one — and the README drew it in both.
+        let mut controller = crate::controller::tests_support::loaded_controller();
+        controller.handle(crate::intent::Intent::NextChange);
+        for (w, h) in [(140u16, 12u16), (60u16, 16u16)] {
+            let out = screen(w, h, &mut controller);
+            assert_eq!(
+                out.matches("07-authz.spec.ts").count(),
+                2,
+                "{w}x{h}: once in the tree row, once as the diff's title: {out}"
+            );
+        }
+    }
+
+    // ---- the help overlay's width ---------------------------------------------------------------
+
+    #[test]
+    fn the_help_overlay_is_only_as_wide_as_its_widest_line() {
+        // It used to be area.width - 4, stretching a ~60-column key list across the whole pane.
+        let lines = help_lines(&default_bindings());
+        let widest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        assert_eq!(help_width(&lines, 200), (widest + 4) as u16);
+    }
+
+    #[test]
+    fn the_help_overlay_never_outgrows_the_pane() {
+        let lines = help_lines(&default_bindings());
+        assert_eq!(help_width(&lines, 20), 18);
+        assert_eq!(help_width(&lines, 1), 1, "never zero-width");
+        assert_eq!(help_width(&lines, 0), 1);
+    }
+
+    #[test]
+    fn the_help_overlay_draws_narrower_than_the_pane() {
+        let mut controller = crate::controller::tests_support::loaded_controller();
+        controller.handle(crate::intent::Intent::Help);
+        let out = screen(160, 30, &mut controller);
+        assert!(out.contains("Keys"), "{out}");
+        // Measure the width of the overlay's own top border row (the one containing "Keys"),
+        // not the maximum over every rendered line: the permanent status bar (task 5) renders a
+        // full-width row ending in a digit, so trim_end() leaves all of it and the maximum over
+        // every line is always the pane width regardless of the overlay's own width.
+        let widest = out
+            .lines()
+            .find(|l| l.contains("Keys"))
+            .map(|l| l.trim_end().chars().count())
+            .unwrap_or(0);
+        assert!(
+            widest < 156,
+            "the overlay still spans nearly the whole pane: {widest}"
+        );
     }
 }
