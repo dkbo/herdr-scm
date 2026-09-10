@@ -22,6 +22,7 @@ pub mod presenter;
 pub mod proc;
 pub mod render;
 pub mod repo_kind;
+pub mod theme;
 pub mod tree;
 
 /// The library entry point the thin binary calls.
